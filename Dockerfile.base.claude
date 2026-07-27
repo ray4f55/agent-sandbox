@@ -1,0 +1,137 @@
+# 使用輕量級的 Debian-based Node 映像檔，確保與各類編譯工具的相容性。
+# Node LTS 有公開 EOL 日程：EOL 後上游停止 rebuild（無安全修補），屆時升到
+# 下一個偶數版（node:22 EOL 2027-04-30 → 升 24）。`--upgrade` 的 base 時效
+# 警告（>180 天無上游更新）會提醒。(B0038)
+FROM node:22-slim
+
+# AGENT_HOME／AGENT_TOOLS：本專案自訂路徑，跟 base image（不管換哪個底層
+# image）慣例無關。AGENT_HOME 是身分/設定資料（.claude 等 bind mount 進來，
+# world-writable），AGENT_TOOLS 是工具二進位（root 擁有，runtime UID 唯讀）。
+# 務必跟 docker-compose.yaml 的 AGENT_SANDBOX_HOME、agent-sandbox.sh 的協調
+# 變數保持一致。see docs/design/agent-sandbox.md（B0043）
+ARG AGENT_HOME=/home/agent-sandbox
+ARG AGENT_TOOLS=/opt/agent-tools
+
+# 1. 安裝 Linux 常見的基礎開發工具
+RUN apt-get update && apt-get install -y \
+    git curl ca-certificates jq less bash libicu-dev \
+    postgresql-client \
+    && rm -rf /var/lib/apt/lists/*
+
+
+# 2. 安裝 mise 本體 (使用自動偵測架構的官方腳本，完美支援 M2 ARM64)
+# MISE_INSTALL_MUSL=1 → 裝 musl 靜態版，不依賴容器 glibc —— gnu 版有 glibc 下限，
+# mise 上游抬高編譯環境（2026-07 起要 GLIBC≥2.38）會讓 --upgrade 抓到的新版在
+# bookworm（2.36）跑不動。只影響 mise 本體，mise 裝的語言不受影響。
+# （安裝腳本不認舊的 ENV MISE_LIBC，那行一直是無效設定。see docs/design/mise.md）
+# MISE_INSTALL_PATH：裝到全域路徑 /usr/local/bin，確保後續指令抓得到
+RUN curl https://mise.run | MISE_INSTALL_PATH=/usr/local/bin/mise MISE_INSTALL_MUSL=1 sh
+
+
+# =========================================================
+# 3. mise data 路徑設定（image 本體不預裝任何語言）
+# 語言由各專案的 mise.toml 在容器內按需安裝 (mise install / mise use)，
+# 安裝結果存到 mise-cache volume (見 docker-compose.yaml)，跨 session 共用
+# B0043：搬到 $AGENT_TOOLS（非 $AGENT_HOME）——這是工具快取、不是身分資
+# 料，不該混進身分那棵樹
+# =========================================================
+ENV MISE_DATA_DIR=${AGENT_TOOLS}/mise-data
+ENV PATH="${AGENT_TOOLS}/mise-data/shims:$PATH"
+
+# 預建 data dir、只開放這個節點可寫（非整棵 $AGENT_TOOLS 777），讓
+# mise-cache volume 第一次掛載時繼承這裡的權限（順序不能反：mkdir 必須
+# 先於 chmod，否則 volume 首次掛載會繼承到 root-only 預設權限、mise 寫
+# 不進去）。see docs/design/agent-sandbox.md（B0043 mise 搬遷）
+RUN mkdir -p "$MISE_DATA_DIR" && chmod 777 "$MISE_DATA_DIR"
+
+# 確保 bash 互動模式自動啟用 mise (cd 到專案後讀其 mise.toml)
+RUN echo 'eval "$(mise activate bash)"' >> /etc/bash.bashrc
+
+# 身分可視化（持續存在的 PS1，B0015）：whoami 不保證反映身分（見「容器內
+# runtime UID 身分」小節的已知環境相依限制），每行提示字元都帶身分名稱，
+# 比一次性 entrypoint banner 更能達到「別在危險身分裡手滑」的目標。必須
+# 接在 mise activate 後面——Debian 預設 /etc/bash.bashrc 可能在互動式
+# shell 啟動時重設 PS1，接在後面才不會被蓋掉。see docs/design/agent-sandbox.md
+RUN echo 'export PS1="[${AGENT_SANDBOX_USER:-agent}] \w \$ "' >> /etc/bash.bashrc
+
+
+# =========================================================
+# 4. 安裝 Claude Code CLI（官方原生 native 安裝，非 cp 裸 binary）
+# =========================================================
+# B 方案：仍裝「當下最新」(dev 工具保鮮)，build 當下版本固化進
+# /etc/claude-cli-version 可追溯，不犧牲「永遠裝最新」。
+#
+# B0021 修正、B0043 起改搬到 $AGENT_TOOLS（非 runtime $HOME）：官方
+# install.sh 認 HOME 這個變數決定裝哪，跟 runtime `$HOME` 是誰無關，
+# 用它建立「claude 認可的正規 native 安裝」——
+#   $AGENT_TOOLS/.local/share/claude/versions/<v> ＋ $AGENT_TOOLS/.local/bin/claude(symlink)
+# ——並把 $AGENT_TOOLS/.local/bin 加進 PATH。claude 執行檔本身是工具、不是
+# 身分資料，搬出 $HOME 後 runtime 只需要讀＋執行，不需要 world-writable
+# （見 docs/design/agent-sandbox.md「B0043」：順便關掉「執行期可被竄改」
+# 的風險，不用再靠 chmod -R 777 覆蓋到工具）。
+# 不再 cp 裸 binary 到 /usr/local/bin：舊作法讓 claude 不認得自己的安裝，
+# 每次容器啟動在暫存層重建 ~233MB native、`claude doctor` 誤判 npm-global
+# 殘留並給錯誤指示、且實際執行版本與 /etc/claude-cli-version 分裂（打臉
+# 本可追溯設計）。$AGENT_TOOLS/.local/{bin,share/claude} 非 bind-mount →
+# image 內建的安裝即 runtime 所見（不被空暫存層蓋掉、亦不寫回 host）。
+# root 裝、預設權限（dir 755／檔案含執行位）就滿足 runtime 讀＋執行需求，
+# 不需要額外 chmod。
+# 升 Claude 走 `agent-sandbox --upgrade`（整鏈 --no-cache 重建，本層必重抓
+# 「當下最新」；每次升級自動留版號快照可 rollback）。see docs/design/agent-sandbox.md
+RUN curl -fsSL https://claude.ai/install.sh | HOME=${AGENT_TOOLS} bash \
+    && ${AGENT_TOOLS}/.local/bin/claude --version > /etc/claude-cli-version \
+    && echo "build date: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /etc/claude-cli-version
+ENV PATH="${AGENT_TOOLS}/.local/bin:${PATH}"
+
+# B0021 收尾：image 層強制關閉 auto-updater —— 保證「容器活著期間不跳版」，
+# 且不依賴每位使用者 bind-mount 的 ~/.claude.json（managed settings 優先級
+# 最高，使用者層設定蓋不掉；空 .claude.json 的新使用者也一樣受保護）。
+# DISABLE_AUTOUPDATER 只關「背景自動更新」；手動 claude update 仍可用（且
+# 在拋棄式容器內也是暫存、退出即丟，不影響 image 內建版本）。配合上方
+# 「裝在非 bind-mount 的暫存層」→ 版本真正釘死在每個 image build。
+# 官方依據：code.claude.com setup/permissions（settings precedence：
+# /etc/claude-code/managed-settings.json 不可被 user 覆蓋）。
+RUN mkdir -p /etc/claude-code \
+    && printf '%s\n' '{ "env": { "DISABLE_AUTOUPDATER": "1" } }' > /etc/claude-code/managed-settings.json
+
+# 靜態 LABEL：指明版本記錄位置（classic builder 無法把指令輸出動態塞進 LABEL，
+# 故 LABEL 只作「去哪查」的指路牌，真實版本以 /etc/claude-cli-version 為準）
+LABEL claude-cli.version-file="/etc/claude-cli-version"
+
+# agent-sandbox --launch 要自動啟動的工具（base 自宣告，函式 inspect 讀；維持 base-agnostic）。
+# addon 層 FROM 本 base 會繼承此 label。see docs/design/agent-sandbox.md「--launch」
+LABEL agent-sandbox.launch="claude"
+
+# 注意：Claude CLI 會把登入憑證寫在 $HOME/.claude；runtime $HOME 由
+# docker-compose.yaml 設定（B0043 起是 $AGENT_HOME＝/home/agent-sandbox）
+# ——這跟上面 claude CLI 本體安裝在 $AGENT_TOOLS 是兩條分開的路徑，
+# 一個是身分資料、一個是工具本身，不要混淆
+
+# =========================================================
+# 5. 解決「幽靈使用者」的家目錄快取寫入權限問題
+# =========================================================
+# $AGENT_HOME 是本專案自訂的新路徑（非 base image 既有目錄），先 mkdir
+# 才有東西可以 chmod
+RUN mkdir -p "$AGENT_HOME" && chmod -R 777 "$AGENT_HOME"
+
+
+# 6. 建立並設定預設工作目錄
+# 注意：使用者專案會掛到 /workspace/<name> 子目錄，/workspace 本身要可寫
+# (這樣使用者進容器後可以 cd .. 到 /workspace 做臨時測試、建測試專案等)
+RUN mkdir -p /workspace && chmod 777 /workspace
+WORKDIR /workspace
+
+# 注意：這裡不寫死 USER，保留給 docker-compose 在啟動時動態傳入您的 UID/GID
+
+# =========================================================
+# 7. entrypoint：runtime UID 動態補 /etc/passwd／/etc/group 紀錄
+# =========================================================
+# ssh／git-over-ssh 呼叫 getpwuid() 查無使用者會直接拒絕執行（非優雅降級）。
+# 開放這兩個檔可寫（world-writable，非 OpenShift 的 GID 0 慣例 g=u——本專案
+# GID 是 host 真實 GID，非固定 0，g=u 在這裡不生效）：容器 cap_drop: ALL +
+# no-new-privileges 已堵死唯一的理論提權路徑（SUID 二進位查表），不構成
+# 風險。see docs/design/agent-sandbox.md（B0044）
+RUN chmod 666 /etc/passwd /etc/group
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod a+rx /usr/local/bin/entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

@@ -1,0 +1,29 @@
+# macOS Finder 產生的目錄中繼垃圾檔，與專案無關，不應進版控
+.DS_Store
+
+# 編輯器個人偏好（如 files.exclude 顯示 .git/），屬本機個人設定不污染版控。
+# 若日後有「想全隊共享」的 workspace 設定，再自行放行特定檔，如：!.vscode/extensions.json
+.vscode/
+
+# 容器內身分資料的鏡射目錄（含多身分子資料夾，如 home/default/、
+# home/ops/），包含登入憑證、mise trust 紀錄等敏感檔，由
+# docker-compose.yaml 透過 bind mount 提供給容器使用
+home/
+
+# 底線開頭的檔案或目錄 — 通常是個人筆記、暫存記錄、終端歷史等
+# 目錄會連同其下所有檔案與子目錄一併排除（gitignore 對目錄的預設行為）
+# 註：backlog skill 的 _backlog/ 也靠這條被排除（刻意：每位開發者的本地狀態）
+_*
+
+# 專案層 agent-sandbox 設定檔（目前含 [mount] 額外掛載段）：用絕對/家目錄
+# 路徑時屬逐開發者本機狀態，不進版控（用相對路徑想隨 repo 分享則自行 !放行）。
+# 跨專案一勞永逸請設全域 gitignore，see docs/design/agent-sandbox.md「額外掛載」
+.agent-sandbox
+
+# .claude/ 採白名單：預設整個排除，只放行團隊共用的子項。
+# 比黑名單安全 —— 未來任何工具往 .claude/ 丟的本地/狀態/快取檔
+# （settings.local.json、*.local、cache 等）預設都被擋，不怕漏列。
+# 取捨：日後若有「要共享」的 .claude/ 內容（如團隊版 settings.json、
+# commands/、agents/、hooks/），需各自再加一行 `!.claude/<那個>` 放行。
+.claude/*
+!.claude/skills/

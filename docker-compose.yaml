@@ -1,0 +1,85 @@
+services:
+  agent:
+    # image 由 agent-sandbox 函式依 --base / --addon 計算後透過 env var 傳入；
+    # build 步驟由函式直接呼叫 raw `podman build` 完成（**不走 compose build**，
+    # 避免 docker-compose classic builder 順手 tag :latest 與歷史 repo:tag
+    # 的副作用 —— 會破壞「具名 tag 凍結、絕不碰 latest」紅線。
+    # 詳見 docs/design/docker-compose.md「pull_policy」與 agent-sandbox.md
+    # 「Build 鏈與凍結語意」。
+    image: ${AGENT_SANDBOX_IMAGE:-agent-sandbox-claude:latest}
+    # userns_mode: "keep-id"  # Podman 特有的擴充，目前無使用（實測已確認多餘：
+    # 不設此欄位時 podman/podman machine 本身在 rootless + 明確 --user 的情況下
+    # 就會自動套用等同 keep-id 的行為，見 docs/design/docker-compose.md）
+    # missing：image 在本地就直接用、不在才 build（不去遠端 pull）。函式
+    # 已經先把 image build 好才呼叫 compose run，所以 compose 永遠走「已
+    # 在」分支；missing 在這裡的角色是「擋 registry pull、保持靜默」。
+    pull_policy: missing
+    # 動態映射您 Mac 上的 UID (例如 501) 與 GID (例如 20) 但要在執行指令時設定環境變數
+    user: "${UID:-1000}:${GID:-1000}" 
+    environment:
+      # 強制設定家目錄，讓 Claude Code 知道去哪裡找憑證，解決幽靈使用者問題。
+      # B0043：改用專案自訂路徑（非借用 base image 的 node:slim 慣例），
+      # 務必跟兩個 Dockerfile 的 ARG AGENT_HOME 保持一致。
+      - HOME=${AGENT_SANDBOX_HOME:-/home/agent-sandbox}
+      # entrypoint 啟動時用這個名字動態補一筆 /etc/passwd 紀錄（否則 ssh／
+      # git-over-ssh 因查無使用者被拒絕執行）。agent-sandbox 函式一律帶入
+      # 目前 --identity 名稱本身（零特例，未設則退回 agent），讓 whoami／
+      # banner 精準反映目前身分。see docs/design/agent-sandbox.md（B0044／B0015）
+      - AGENT_SANDBOX_USER=${AGENT_SANDBOX_USER:-agent}
+    volumes:
+      # 將您當下終端機所在的「專案資料夾」掛載到 /workspace 底下的同名子目錄
+      # (e.g. host: ~/projects/myapp → container: /workspace/myapp)
+      # 好處：/workspace 本身保留乾淨可寫，cd .. 出去做暫時測試也不離開 /workspace
+      - ${WORKSPACE_DIR:?WORKSPACE_DIR must be set, e.g. WORKSPACE_DIR=$$PWD podman-compose up}:/workspace/${WORKSPACE_NAME:?WORKSPACE_NAME must be set (normally agent-sandbox function sets this from basename of PWD)}
+      # 設定型檔案放在 repo 內的 home/<identity>/ 結構（B0015：多身分，
+      # AGENT_SANDBOX_IDENTITY 由 agent-sandbox 函式的 --identity 旗標決
+      # 定，預設 default；host 端資料夾名稱與容器端目標路徑各自獨立命名，
+      # 不需要逐字對應，見 docs/design/agent-sandbox.md「容器內 runtime
+      # UID 身分」），鏡射進容器內 ${AGENT_SANDBOX_HOME:-/home/agent-sandbox}/
+      - ./home/${AGENT_SANDBOX_IDENTITY:-default}/.claude:${AGENT_SANDBOX_HOME:-/home/agent-sandbox}/.claude
+      - ./home/${AGENT_SANDBOX_IDENTITY:-default}/.claude.json:${AGENT_SANDBOX_HOME:-/home/agent-sandbox}/.claude.json
+      # codex base 的登入憑證（~/.codex）。所有 base 都掛（B0016 方案 A）——
+      # 對 claude base 只是空資料夾、無害；per-identity 條件掛載已由 B0015
+      # 的多身分機制取代（每個身分資料夾自己決定要不要 populate 這個檔）
+      - ./home/${AGENT_SANDBOX_IDENTITY:-default}/.codex:${AGENT_SANDBOX_HOME:-/home/agent-sandbox}/.codex
+      # 容器內 git identity（global fallback）：受控鏡射檔，由 agent-sandbox 函式
+      # 首次自動從 host global 身分生成。see docs/design/agent-sandbox.md「容器內 git identity」
+      - ./home/${AGENT_SANDBOX_IDENTITY:-default}/.gitconfig:${AGENT_SANDBOX_HOME:-/home/agent-sandbox}/.gitconfig
+      # mise 全域設定 (~/.config/mise/config.toml)：bind mount，host 上編輯後重啟容器生效
+      - ./home/${AGENT_SANDBOX_IDENTITY:-default}/.config/mise:${AGENT_SANDBOX_HOME:-/home/agent-sandbox}/.config/mise
+      # B0015：遠端管理用的 SSH 金鑰，跟其他身分資料同一份清單、同一套待遇
+      # （不走 -m 額外掛載機制——一旦 identity 本身就是一整份專屬資料夾，
+      # .ssh 沒理由被特殊對待）。預設 identity（default）留空即可，無害。
+      - ./home/${AGENT_SANDBOX_IDENTITY:-default}/.ssh:${AGENT_SANDBOX_HOME:-/home/agent-sandbox}/.ssh
+      # 注意：「mise trust 紀錄」刻意「不」持久化 — 它存在 ~/.local/state/mise/，是純路徑 hash
+      # (不同專案會撞同一個 /workspace/<name> 路徑空間，持久化會把「A 的信任」自動套到 B)
+      # 留在容器內、隨容器消失 = 每次 session 由使用者重新確認，避免惡意 mise.toml 透過 hook 偷 token
+      # mise 安裝的語言/工具走 named volume：大量、I/O 密集、可重建，避免 macOS bind mount 跨界 I/O 拖慢。
+      # B0043：搬到 /opt/agent-tools/mise-data（跟兩個 Dockerfile 的
+      # ARG AGENT_TOOLS 保持一致）——這是工具快取、不是身分資料，搬出
+      # $AGENT_SANDBOX_HOME 那棵樹，理由見 docs/design/agent-sandbox.md
+      - mise-cache:/opt/agent-tools/mise-data
+    working_dir: /workspace/${WORKSPACE_NAME:?WORKSPACE_NAME must be set}
+      
+    
+    # --- 最高級別安全隔離防護 ---
+    cap_drop:
+      - ALL                    # 剝奪所有 Linux 核心特權
+    security_opt:
+      - no-new-privileges:true # 徹底防堵透過 SUID 程式進行權限提升
+      
+    # --- 資源使用限制 (防止 Agent 暴走拖垮您的 M2 Mac) ---
+    # 注意：原本用 deploy.resources.limits，但那是 Docker Swarm 專用語法，
+    # 非 swarm 的 `docker compose up` 會「整段忽略」(podman-compose 部分版本才會
+    # 好心翻譯，行為不保證)。改用下面 Compose v2 service 頂層欄位，單機正式支援。
+    mem_limit: 4g            # 最多 4GB 記憶體
+    cpus: 2.0                # 最多 2 核心 CPU
+    pids_limit: 512          # 最多 512 個 process — 防 fork bomb / 失控 build 吃光 host
+
+volumes:
+  # mise 裝的語言／工具持久化於此，跨 session／專案／日共用。
+  # external + 固定 name：避免 compose 把當日 project label 寫進 volume，
+  # 跨日不報警；agent-sandbox 啟動時冪等建。see docs/design/docker-compose.md
+  mise-cache:
+    external: true
+    name: agent-sandbox-mise-cache

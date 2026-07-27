@@ -1,0 +1,128 @@
+# 自動 build sandbox image 並推到 GHCR（多架構 arm64 + amd64）。
+# 這是「純發佈」管線：只負責 build+push，完全不改本機 agent-sandbox 流程
+# （本機仍是 podman build、pull_policy: missing 不變）。設計取捨見
+# docs/design/ci-ghcr.md。
+name: build-images
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    # 只有 Dockerfile 或本 workflow 改動才 build（純文件改動不觸發）。
+    paths:
+      - 'Dockerfile.base.*'
+      - 'Dockerfile.addon.*'
+      - 'Dockerfile.override.*'
+      - '.github/workflows/build-images.yml'
+  workflow_dispatch: {}
+
+env:
+  REGISTRY: ghcr.io
+  PLATFORMS: linux/amd64,linux/arm64
+
+jobs:
+  # ── base 層：agent-sandbox-<base> ───────────────────────────────────────
+  base:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        # 新增 base 時在此加一行（對應 Dockerfile.base.<name>）。
+        base: [claude, codex]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/agent-sandbox-${{ matrix.base }}
+          # push main → :latest（+ :sha-xxxx）；push tag vX.Y.Z → :vX.Y.Z（凍結）。
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=tag
+            type=sha,format=short
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.base.${{ matrix.base }}
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── addon 層：agent-sandbox-<base>-<addon>（疊在已推送的 base 上）────────
+  addon:
+    needs: base
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        # 新增 addon 組合時在此加一筆（對應 Dockerfile.addon.<addon>）。
+        include:
+          - base: claude
+            addon: openspec
+          - base: codex
+            addon: openspec
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 鏈一致性（對應「整鏈共用 image_tag」紅線）：addon 要疊在「同一 tag」
+      # 的 base 上 —— tag push 用 vX.Y.Z，其餘（main / 手動）用 latest。
+      - id: basetag
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            tag="${{ github.ref_name }}"
+          else
+            tag="latest"
+          fi
+          owner="${{ github.repository_owner }}"
+          echo "ref=${REGISTRY}/${owner}/agent-sandbox-${{ matrix.base }}:${tag}" >> "$GITHUB_OUTPUT"
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/agent-sandbox-${{ matrix.base }}-${{ matrix.addon }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=tag
+            type=sha,format=short
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.addon.${{ matrix.addon }}
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          build-args: |
+            BASE_IMAGE=${{ steps.basetag.outputs.ref }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

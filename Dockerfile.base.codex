@@ -1,0 +1,81 @@
+# 使用輕量級的 Debian-based Node 映像檔，確保與各類編譯工具的相容性。
+# FROM 版本與 Dockerfile.base.claude 同步升級（Node LTS EOL 節奏見該檔檔頭註解）。
+FROM node:22-slim
+
+# AGENT_HOME／AGENT_TOOLS：本專案自訂路徑，跟 base image 慣例無關（同
+# base.claude，務必跟 docker-compose.yaml／agent-sandbox.sh 保持一致）。
+# see docs/design/agent-sandbox.md（B0043）
+ARG AGENT_HOME=/home/agent-sandbox
+ARG AGENT_TOOLS=/opt/agent-tools
+
+# 1. 安裝 Linux 常見的基礎開發工具（與 base.claude 同組，維持各 base 容器體驗一致）
+RUN apt-get update && apt-get install -y \
+    git curl ca-certificates jq less bash libicu-dev \
+    postgresql-client \
+    && rm -rf /var/lib/apt/lists/*
+
+
+# 2. 安裝 mise 本體（同 base.claude；MISE_INSTALL_MUSL=1 的理由 see docs/design/mise.md）
+RUN curl https://mise.run | MISE_INSTALL_PATH=/usr/local/bin/mise MISE_INSTALL_MUSL=1 sh
+
+
+# =========================================================
+# 3. mise data 路徑設定（image 本體不預裝任何語言；同 base.claude，
+# B0043 起搬到 $AGENT_TOOLS，mkdir→chmod 順序不能反，理由見該檔註解）
+# =========================================================
+ENV MISE_DATA_DIR=${AGENT_TOOLS}/mise-data
+ENV PATH="${AGENT_TOOLS}/mise-data/shims:$PATH"
+RUN mkdir -p "$MISE_DATA_DIR" && chmod 777 "$MISE_DATA_DIR"
+RUN echo 'eval "$(mise activate bash)"' >> /etc/bash.bashrc
+
+# 身分可視化 PS1（同 base.claude，理由與紅線見該檔註解，B0015）
+RUN echo 'export PS1="[${AGENT_SANDBOX_USER:-agent}] \w \$ "' >> /etc/bash.bashrc
+
+
+# =========================================================
+# 4. 安裝 OpenAI Codex CLI（npm 官方渠道 = Rust 原生 binary）
+# =========================================================
+# 裝「當下最新」（保鮮哲學同 claude base）；升級走 agent-sandbox --upgrade。
+# npm 套件 @openai/codex 是薄包裝，經 optionalDependencies 依平台下載原生
+# Rust binary（linux-arm64 為 musl 靜態連結 → 無 glibc 下限問題）；已廢棄的
+# 舊 TypeScript 實作只存在於古版號（0.1x/0.2x），裝最新不可能誤裝
+# （B0016 於 bookworm/arm64 實測驗證，2026-07-04）。
+# codex 無背景自動更新（npm 發行、版本釘在 image 層），不需 claude base 的
+# managed-settings 等效段。
+RUN npm install -g @openai/codex \
+    && codex --version > /etc/codex-cli-version \
+    && echo "build date: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /etc/codex-cli-version
+
+# 登入憑證寫在 $HOME/.codex —— docker-compose 掛 host 的 home/<identity>/.codex
+# 持久化（B0016 方案 A：所有 base 都掛，見 docker-compose.yaml 註解；B0015
+# 起 <identity> 可切換，預設 default）。
+# 注意：這裡的 codex CLI 本體是用 npm 全域安裝（root 預設 prefix，跟
+# $HOME/$AGENT_HOME/$AGENT_TOOLS 都無關），本來就不在身分資料那棵樹裡，
+# B0043 搬遷不需要動這段——只有登入憑證（$HOME/.codex）跟著 $AGENT_HOME 走。
+
+# 靜態 LABEL：指明版本記錄位置（慣例同 claude-cli.version-file）
+LABEL codex-cli.version-file="/etc/codex-cli-version"
+
+# agent-sandbox --launch 要自動啟動的工具（base 自宣告；維持函式 base-agnostic）
+LABEL agent-sandbox.launch="codex"
+
+
+# =========================================================
+# 5. 解決「幽靈使用者」的家目錄快取寫入權限問題（同 base.claude）
+# =========================================================
+RUN mkdir -p "$AGENT_HOME" && chmod -R 777 "$AGENT_HOME"
+
+
+# 6. 建立並設定預設工作目錄（同 base.claude；/workspace 本身保持可寫）
+RUN mkdir -p /workspace && chmod 777 /workspace
+WORKDIR /workspace
+
+# 注意：這裡不寫死 USER，保留給 docker-compose 在啟動時動態傳入您的 UID/GID
+
+# =========================================================
+# 7. entrypoint：runtime UID 動態補 /etc/passwd／/etc/group 紀錄（同 base.claude）
+# =========================================================
+RUN chmod 666 /etc/passwd /etc/group
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod a+rx /usr/local/bin/entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

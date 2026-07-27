@@ -1,0 +1,32 @@
+# ============================================================
+# 注意：此檔案目前 *不會* 被 COPY 進 image，僅作為參考範例
+#
+# 設計演進：
+# - 舊版：本檔會被 baked into image，build 時 mise install --system 一次裝完
+#         → image 變得很肥 (數 GB)，但很多 session 用不到
+# - 新版：image 保持極簡，語言由「各專案自己的 mise.toml」在容器內動態安裝
+#         → 安裝結果持久化在 mise-cache volume，跨 session 共用 (見 docker-compose.yaml)
+#
+# 怎麼用 (在你要開發的專案目錄)：
+# 1. 在專案根目錄建一個 mise.toml，內容可參考下方
+# 2. cc-container 進到容器後 cd /workspace
+# 3. mise activate 會自動讀取，配合 `mise install` 一鍵裝齊
+# 4. 第二次同樣的語言/版本就秒用 (cache hit)
+# ============================================================
+
+[tools]
+python = "3.11"
+# Go 半年一個大版、只支援最近兩個大版（約一年）。此處跟到近期大版 1.26
+# (查當前最新：mise ls-remote go)。範例只釘大版即可，patch 交給 mise 解析。
+go = "1.26"
+dotnet = "8.0" # 安裝 .NET 8 LTS SDK (C#)
+
+# 容器本身有node
+# node = "20" # 若要確保 mise 統一接管 Node 環境再打開
+# 建議 Node.js 先安裝，再安裝依賴於 npm 的全域工具 (如 Angular CLI)
+# 刻意釘大版本（非 latest）：範例本身要示範「可重現」。latest 會讓每次安裝
+# 結果漂移，固定大版才能跨機器/跨時間得到一致環境。實際版本依專案需求調整。
+"npm:@angular/cli" = "21"
+
+# rust = "latest"
+# trust test Fri May 15 08:26:14 UTC 2026

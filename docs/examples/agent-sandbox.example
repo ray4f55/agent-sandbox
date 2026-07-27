@@ -1,0 +1,74 @@
+# ============================================================
+# .agent-sandbox —— 設定檔範例（每行 key = value，重複 key 視為清單）
+#
+# 像 git config 一樣分兩處：
+#   專案根（本檔）              → [mount]（額外掛載）、[image]（預設 base/addon）
+#   agent-sandbox 工具目錄      → [mount]（每個 sandbox 都想掛的全域路徑）
+# [image] 只認專案層（放工具目錄會 ⚠️ 略過）；未知段前向相容略過；段標頭獨佔一行。
+# 容器 git 身分不在這裡 —— 是 home/<identity>/.gitconfig（標準 git 檔，預設
+# 身分是 home/default/.gitconfig），見 README「多身分」段。
+#
+# 怎麼用：
+# 1. 複製本檔到你「要開發的專案」根目錄，改名為 .agent-sandbox
+#       cp docs/examples/agent-sandbox.example ~/你的專案/.agent-sandbox
+# 2. 取消下方你需要那幾行的註解、改成你的路徑/變體
+# 3. 在該專案目錄跑 agent-sandbox，啟動會印「📄 讀取 …/.agent-sandbox」
+#
+# 進不進版控？
+# - 專案層用「相對路徑」（../backend）→ 機器無關，可 commit 隨 repo 分享給隊友
+#   （本 repo .gitignore 預設擋 .agent-sandbox，要分享就加一行 !.agent-sandbox 放行）
+# - 用「絕對 / ~ 路徑」或全域層 → 逐開發者本機狀態，別進版控；一勞永逸設全域：
+#       echo '.agent-sandbox' >> ~/.config/git/ignore
+#
+# 完整說明見 README「額外掛載」段與 docs/design/agent-sandbox.md。
+# ============================================================
+
+[mount]
+# 一行一條：path = <host>[:<container>][:ro]
+#   host       ~ 會展開；相對路徑相對「你 cd 進去的專案目錄」；絕對路徑直接用
+#              （全域層 —— 放工具目錄那份 —— 的 host 須絕對/~，相對沒有基準）
+#   container  省略   → /workspace/<host 的 basename>
+#              裸別名 → /workspace/<別名>（免打 /workspace/ 前綴；ro/rw 是保留字不可當別名）
+#              /開頭  → 完整絕對路徑原樣（非 /workspace 會 ⚠️ 警告，可能蓋容器內既有檔）
+#   ro         唯讀（省略＝可讀寫）；只能當第三段，要唯讀得連別名一起寫
+#
+# 全域 + 專案 + CLI -m 全部累加；啟動 📎 清單逐條標來源（全域/專案/-m）。
+
+# 範例（取消註解並改成你的路徑）：
+
+# 後端跟著前端一起開（掛到 /workspace/backend）
+# path = ../backend
+
+# 指定別名，免打 /workspace/ 前綴（掛到 /workspace/api）
+# path = ../some/long/path/backend:api
+
+# 共用 schema 唯讀（掛到 /workspace/shared，read-only）
+# path = ../shared:shared:ro
+
+# 進階逃生口：掛到 /workspace 以外（會印 ⚠️ 警告，自負其責）
+# path = ~/data/dump:/data/dump:ro
+
+# 例外專案：不要繼承「工具目錄全域 [mount]」（只在專案層有意義）
+# inherit-global = false
+
+# 範例
+# path = ../it-km-qa-web:qa-web
+# path = ../testa/foo:/data/ra
+# path = ../it-km-log-service:shared-try-readonly:ro
+
+[image]
+# 逐專案預設 base/addon —— 在這個專案打 agent-sandbox 就自動套用。
+# base：--base 蓋過它（單值覆蓋）。addon：與 CLI --addon 疊加去重（清單）。
+# 不想用某預設 addon？把該行 # 註解掉即可（不需任何旗標）。
+#
+# base = claude          # 預設就是 claude，通常不用寫
+# addon = openspec       # 可重複多行依序疊層
+
+# ============================================================
+# 全域 [mount]（每個專案都想掛的共用資料夾）—— 放「agent-sandbox 工具目錄」
+# 的 .agent-sandbox（不是專案根），路徑須絕對/~。⚠️ 全域 mount 每個 sandbox
+# 都掛，被攻陷的專案能寫到它，建議盡量 :ro：
+#
+#   [mount]
+#   path = ~/refs/shared:shared:ro
+# ============================================================

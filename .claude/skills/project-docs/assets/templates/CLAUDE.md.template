@@ -1,0 +1,39 @@
+# CLAUDE.md — 設計紅線索引
+
+讀本檔的目的：開 session 第一眼快速腦補本專案的設計取捨，**避免動到刻
+意設計的部分**。
+
+`@` 開頭的行是 Claude Code 自動 inline 載入的細節檔；人類讀者也可直接
+打開讀，是 committed 的 markdown 文件。
+
+## 文件分工
+
+- `README.md` — 使用方式（指令、操作步驟）
+- `CLAUDE.md`（本檔）+ `docs/design/*.md` — 設計取捨與紅線（為什麼這樣設）
+- `docs/examples/` — 可複製的設定範例
+- `docs/reference/` — 查表（env vars、命名約定、檔案結構等）
+- `_backlog/`（若使用 backlog skill）— gitignored 過程史；不在 repo 內
+
+## 寫程式碼時的紀律
+
+- 修改任何標 `(see docs/design/...)` 的程式碼前，**先讀那個 design 檔**
+- 寫新的「為什麼這樣」內聯註解時，最多 2 行 + `(see docs/design/<topic>.md)`；
+  想寫更長就去 design 檔寫
+- 重大決策結案後若結論對未來維護者有公開價值，把結論一段抽進
+  `docs/design/<topic>.md`，附「（原追蹤於 Bxxxx）」provenance
+- 做 user-facing breaking 變更（指令／用法／檔案結構改、舊用法失效）時，
+  在 `docs/guides/` 新增遷移文件（檔名建議 `migrate-<from>-<to>.md`）
+
+## 主題紅線
+
+<!--
+TODO：填本專案的紅線 invariant。每個主題一節，格式：
+
+### <被文件化的檔名> — 詳見 docs/design/<檔名>.md
+
+- 一句話 invariant → **不要做什麼**
+- 一句話 invariant → **不要做什麼**
+
+然後在本節末用「行首 @ 接路徑」一行讓 Claude Code 自動載入細節檔
+（本 TODO 註解內不示範語法，避免 HTML 註解被當引用觸發誤導）。
+-->

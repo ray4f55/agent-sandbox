@@ -1,0 +1,14 @@
+# macOS Finder 中繼垃圾
+.DS_Store
+
+# 編輯器個人偏好（如有想全隊共享的特定檔再用 `!` 放行）
+.vscode/
+
+# 底線開頭 = 個人本地檔／資料夾
+# 慣例：backlog skill 的 _backlog/、notes skill 的 _notes/、暫存 _temp.md 等都靠這條被排除
+_*
+
+# .claude/ 採白名單：預設全排除、只放行團隊共用的子項
+# 比黑名單安全（settings.local.json / cache / state 等預設都被擋）
+.claude/*
+!.claude/skills/

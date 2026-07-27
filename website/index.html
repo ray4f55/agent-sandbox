@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="zh-Hant" data-lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agent-sandbox — 給 AI 代理的拋棄式容器沙盒</title>
+<meta name="description" content="Disposable container sandbox for AI coding agents (Claude Code, Codex). 給 AI 代理的拋棄式容器沙盒：放心全速跑 agent，主機與憑證零風險。">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<meta name="theme-color" content="#0d1117">
+<style>
+:root{
+  --bg:#0d1117; --panel:#161b22; --border:#2d333b;
+  --fg:#e6edf3; --muted:#9198a1; --accent:#c9503a; --accent2:#58a6ff;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--fg);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans TC",sans-serif;line-height:1.7}
+a{color:var(--accent2);text-decoration:none}
+a:hover{text-decoration:underline}
+.wrap{max-width:920px;margin:0 auto;padding:0 24px}
+
+/* 語言切換：html[data-lang] 決定顯示哪組文案 */
+[data-lang="zh"] .en{display:none!important}
+[data-lang="en"] .zh{display:none!important}
+
+header{display:flex;justify-content:space-between;align-items:center;padding:20px 0}
+.brand{font-family:var(--mono);font-weight:700;font-size:1.05rem;display:flex;align-items:center;gap:10px}
+.brand img{width:24px;height:24px;display:block}
+.lang-toggle{display:flex;gap:2px;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+.lang-toggle button{background:none;border:0;color:var(--muted);font:inherit;font-size:.85rem;padding:4px 12px;cursor:pointer}
+.lang-toggle button.active{background:var(--panel);color:var(--fg)}
+
+.hero{padding:72px 0 56px;text-align:center}
+.hero h1{font-size:clamp(1.8rem,4.5vw,2.8rem);line-height:1.3;letter-spacing:-.01em}
+.hero .sub{color:var(--muted);max-width:640px;margin:20px auto 0;font-size:1.06rem}
+.hero .danger{font-family:var(--mono);color:var(--accent);font-size:.95em;white-space:nowrap}
+.cta{margin-top:36px;display:flex;gap:14px;justify-content:center;flex-wrap:wrap}
+.btn{display:inline-block;padding:10px 22px;border-radius:8px;font-weight:600}
+.btn.primary{background:var(--accent);color:#fff}
+.btn.primary:hover{filter:brightness(1.1);text-decoration:none}
+.btn.ghost{border:1px solid var(--border);color:var(--fg)}
+.btn.ghost:hover{border-color:var(--muted);text-decoration:none}
+.hero .oneliner{margin:34px auto 0;max-width:560px}
+
+section{padding:48px 0;border-top:1px solid var(--border)}
+h2{font-size:1.5rem;margin-bottom:24px}
+h2::before{content:"# ";color:var(--accent);font-family:var(--mono)}
+
+.pains{display:grid;gap:14px}
+.pains li{list-style:none;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px 18px;color:var(--muted)}
+.pains li b{color:var(--fg)}
+
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:18px}
+.card h3{font-size:1rem;margin-bottom:8px}
+.card h3::before{content:"▸ ";color:var(--accent)}
+.card p{color:var(--muted);font-size:.92rem}
+
+pre{background:#010409;border:1px solid var(--border);border-radius:10px;padding:18px;overflow-x:auto;font-family:var(--mono);font-size:.88rem;line-height:1.8;text-align:left}
+pre .c{color:#7d8590}
+pre .p{color:var(--accent)}
+
+.shots{display:grid;gap:28px}
+.shots figure{margin:0}
+.shots img{width:100%;max-width:100%;border:1px solid var(--border);border-radius:12px;display:block}
+.shots figcaption{color:var(--muted);font-size:.9rem;margin-top:10px;text-align:center}
+
+footer{border-top:1px solid var(--border);padding:32px 0;color:var(--muted);font-size:.9rem;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="brand"><img src="favicon.svg" alt="">agent-sandbox</div>
+  <nav class="lang-toggle" aria-label="language">
+    <button id="btn-zh" onclick="setLang('zh')">中文</button>
+    <button id="btn-en" onclick="setLang('en')">EN</button>
+  </nav>
+</header>
+
+<div class="hero">
+  <h1>
+    <span class="zh">給 AI 代理的<br>拋棄式容器沙盒</span>
+    <span class="en">A disposable container sandbox<br>for AI coding agents</span>
+  </h1>
+  <p class="sub">
+    <span class="zh">放心讓 Claude Code、Codex <span class="danger">全自動火力全開</span>——最壞情況也只是容器內亂砍，主機檔案、登入憑證、其他專案毫髮無傷。</span>
+    <span class="en">Let Claude Code or Codex run on <span class="danger">full auto</span>, worry-free. Worst case, the mess stays inside the container — your host files, credentials and other projects stay untouched.</span>
+  </p>
+  <div class="cta">
+    <a class="btn primary" href="https://github.com/ray4f55/agent-sandbox">GitHub →</a>
+    <a class="btn ghost" href="#quickstart"><span class="zh">快速開始</span><span class="en">Quick start</span></a>
+  </div>
+  <pre class="oneliner"><span class="c"><span class="zh"># 日常：一個指令，秒進沙盒</span><span class="en"># daily driver: one command, instant sandbox</span></span>
+<span class="p">$</span> agent-sandbox</pre>
+</div>
+
+<section>
+  <h2><span class="zh">為什麼需要它</span><span class="en">Why</span></h2>
+  <ul class="pains">
+    <li>
+      <span class="zh"><b>Agent 想全速跑，你不想全機放行。</b>自動裝套件、跑 build、改檔案——都該發生在圍欄裡，而不是你的 host 上。</span>
+      <span class="en"><b>Your agent wants full speed; you don't want to hand it your machine.</b> Installing packages, running builds, editing files — all of it belongs inside a fence, not on your host.</span>
+    </li>
+    <li>
+      <span class="zh"><b>多專案並行，互不污染。</b>每個專案一個獨立沙盒，各跑各的 agent。</span>
+      <span class="en"><b>Multiple projects, zero cross-contamination.</b> Each project gets its own sandbox, running its own agent.</span>
+    </li>
+    <li>
+      <span class="zh"><b>環境要能凍結、能回滾。</b>每次升級自動留版號快照，升壞了一個指令跑回上一版。</span>
+      <span class="en"><b>Environments you can freeze and roll back.</b> Every upgrade leaves a version snapshot — if the new one breaks, one command takes you back.</span>
+    </li>
+  </ul>
+</section>
+
+<section>
+  <h2><span class="zh">主要特色</span><span class="en">Features</span></h2>
+  <div class="grid">
+    <div class="card">
+      <h3><span class="zh">預設拋棄式</span><span class="en">Disposable by default</span></h3>
+      <p><span class="zh">每次啟動都是全新的 <code>--rm</code> 容器，退出即消失；你的程式碼留在 host 專案夾。</span><span class="en">Every session is a fresh <code>--rm</code> container, gone on exit; your code stays in the host project folder.</span></p>
+    </div>
+    <div class="card">
+      <h3><span class="zh">硬性資源與權限箝制</span><span class="en">Hard resource &amp; privilege limits</span></h3>
+      <p><span class="zh">4GB RAM、2 CPU、512 行程上限；剝奪全部 Linux capabilities、防 SUID 提權。失控的 agent 拖不垮你的機器。</span><span class="en">4GB RAM, 2 CPUs, 512-process cap; all Linux capabilities dropped, no privilege escalation. A runaway agent can't take down your machine.</span></p>
+    </div>
+    <div class="card">
+      <h3><span class="zh">run / build 分家</span><span class="en">Run/build separation</span></h3>
+      <p><span class="zh">日常啟動秒起、零互動；<code>--upgrade</code> 一鍵把工具鏈刷到最新並自動留 semver 快照。</span><span class="en">Daily startup is instant and prompt-free; <code>--upgrade</code> refreshes the whole toolchain and auto-tags a semver snapshot.</span></p>
+    </div>
+    <div class="card">
+      <h3><span class="zh">多 agent base</span><span class="en">Multiple agent bases</span></h3>
+      <p><span class="zh">內建 Claude Code 與 Codex base，一個旗標切換；add-on（如 OpenSpec）可疊在任何 base 上。</span><span class="en">Claude Code and Codex bases built in, one flag to switch; add-ons (like OpenSpec) stack on any base.</span></p>
+    </div>
+    <div class="card">
+      <h3><span class="zh">語言環境跨專案共用</span><span class="en">Shared language cache</span></h3>
+      <p><span class="zh">image 不預裝語言——由 mise 按各專案 <code>mise.toml</code> 安裝，快取跨專案共用，同版本第二次秒用。</span><span class="en">No languages baked into the image — mise installs per-project from <code>mise.toml</code> into a shared cache; same version is instant the second time.</span></p>
+    </div>
+    <div class="card">
+      <h3><span class="zh">登入一次就好</span><span class="en">Log in once</span></h3>
+      <p><span class="zh">agent 的登入態掛載自 host——容器用完就丟，但不用一直重新登入。</span><span class="en">Agent credentials are mounted from the host — containers are disposable, your login isn't.</span></p>
+    </div>
+    <div class="card">
+      <h3><span class="zh">多身分切換</span><span class="en">Multiple identities</span></h3>
+      <p><span class="zh"><code>--identity ops</code> 切換一整組獨立憑證（含 SSH 金鑰）——開發身分不必帶長期金鑰，維運身分不必裝額外工具，風險互不牽連。</span><span class="en"><code>--identity ops</code> switches to a fully separate credential set (including SSH keys) — a dev identity never needs long-lived keys, an ops identity never needs extra tooling, so the blast radius stays contained.</span></p>
+    </div>
+  </div>
+</section>
+
+<section id="quickstart">
+  <h2><span class="zh">快速開始</span><span class="en">Quick start</span></h2>
+  <pre>
+<span class="c"><span class="zh"># 需求：macOS / Linux + Podman（Windows 走 WSL2）</span><span class="en"># requires macOS / Linux + Podman (Windows via WSL2)</span></span>
+<span class="p">$</span> git clone https://github.com/ray4f55/agent-sandbox.git
+<span class="p">$</span> cd agent-sandbox && ./init.sh --apply   <span class="c"><span class="zh"># 一次性設定（逐項徵詢）</span><span class="en"># one-time setup (asks before each step)</span></span>
+
+<span class="p">$</span> cd ~/your-project
+<span class="p">$</span> agent-sandbox --upgrade   <span class="c"><span class="zh"># 首次：建 image（自動留版號快照）</span><span class="en"># first time: build the image (auto version snapshot)</span></span>
+<span class="p">$</span> agent-sandbox             <span class="c"><span class="zh"># 之後天天用這個：秒進沙盒</span><span class="en"># every day after: instant sandbox</span></span></pre>
+  <p style="color:var(--muted);margin-top:14px;font-size:.92rem">
+    <span class="zh">完整文件（設計取捨、多變體、額外掛載、升級與回滾）都在 <a href="https://github.com/ray4f55/agent-sandbox#readme">GitHub README</a>。</span>
+    <span class="en">Full docs (design rationale, variants, extra mounts, upgrades &amp; rollback) live in the <a href="https://github.com/ray4f55/agent-sandbox#readme">GitHub README</a>.</span>
+  </p>
+</section>
+
+<section>
+  <h2><span class="zh">實際長什麼樣</span><span class="en">See it in action</span></h2>
+  <div class="shots">
+    <figure>
+      <img src="assets/demo-daily.gif" loading="lazy"
+           alt="agent-sandbox daily usage: one command to enter the sandbox">
+      <figcaption>
+        <span class="zh">日常：一個指令進沙盒，工具鏈就緒，退出即拋棄</span>
+        <span class="en">Daily driver: one command in, toolchain ready, disposable on exit</span>
+      </figcaption>
+    </figure>
+    <figure>
+      <img src="assets/demo-upgrade.gif" loading="lazy"
+           alt="agent-sandbox upgrade: automatic version snapshots and rollback">
+      <figcaption>
+        <span class="zh">升級：<code>--upgrade</code> 自動留版號快照，隨時 rollback 回舊版</span>
+        <span class="en">Upgrades: <code>--upgrade</code> auto-tags a snapshot — roll back anytime</span>
+      </figcaption>
+    </figure>
+  </div>
+</section>
+
+<section>
+  <h2><span class="zh">預建 image</span><span class="en">Prebuilt images</span></h2>
+  <p style="color:var(--muted)">
+    <span class="zh">不想本機 build？CI 自動發佈多架構（arm64 + amd64）image 到 GHCR：</span>
+    <span class="en">Don't want to build locally? CI publishes multi-arch (arm64 + amd64) images to GHCR:</span>
+  </p>
+  <pre style="margin-top:14px"><span class="p">$</span> podman pull ghcr.io/ray4f55/agent-sandbox-claude:latest</pre>
+</section>
+
+<footer>
+  <div>MIT License · © 2026 Ray</div>
+  <div><a href="https://github.com/ray4f55/agent-sandbox">GitHub</a></div>
+</footer>
+
+</div>
+<script>
+function setLang(l){
+  document.documentElement.dataset.lang = l;
+  document.documentElement.lang = l === 'zh' ? 'zh-Hant' : 'en';
+  document.getElementById('btn-zh').classList.toggle('active', l==='zh');
+  document.getElementById('btn-en').classList.toggle('active', l==='en');
+  try{localStorage.setItem('lang', l)}catch(e){}
+}
+setLang((()=>{
+  try{ const s=localStorage.getItem('lang'); if(s) return s; }catch(e){}
+  return (navigator.language||'').toLowerCase().startsWith('zh') ? 'zh' : 'en';
+})());
+</script>
+</body>
+</html>

@@ -1,0 +1,30 @@
+# .dockerignore — 控制送進 container engine 的 build context
+#
+# 跟 .gitignore 目的不同，兩者不能互相取代：
+#   .gitignore   防「憑證等被 git commit」
+#   .dockerignore 防「憑證等被打包進 build context 送進 daemon」
+# 本 Dockerfile 目前沒有任何 COPY，所以這些東西不會進最終 image，
+# 但 build context 仍會送進 daemon (暫存/build cache 層)。裡面有 Claude
+# 登入 token，沒必要承擔這個曝險，且可當「未來誤加 COPY .」的安全網。
+#
+# 語法注意：所有 pattern 相對 build context 根目錄 (build: . 的那個 .)，
+# 沒有 .gitignore 的「就近生效」概念。本檔未用 `!` 重新包含，故無順序坑。
+
+# 文件 / 文字資料 (Dockerfile 不需要)
+*.md
+*.bak
+
+# Host bind mount 用的目錄，runtime 才掛進容器，不該被 build 看到
+# (含 home/node/.claude 憑證 — 這是本檔最重要的目的)
+home/
+
+# 暫存與工具產出
+.DS_Store
+*.swp
+.git/
+node_modules/
+.venv/
+__pycache__/
+
+# 整個 docs/ 不參與 image build（文件、範例、查表都跟 runtime 無關）
+docs/

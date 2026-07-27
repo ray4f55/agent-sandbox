@@ -1,0 +1,40 @@
+# {{project_name}}
+
+<!-- TODO: 一段 elevator pitch — 這個專案是什麼、給誰用、解決什麼問題。
+     1-2 句話。OSS 訪客 5 秒判斷要不要繼續往下讀的依據。 -->
+
+## 解決什麼問題
+
+<!-- TODO: 3-5 條 bullet，描述具體使用情境／痛點。
+     寫給「正在 google 你的關鍵字、想看看這專案能不能幫他」的人。 -->
+
+-
+-
+-
+
+## 主要設計
+
+<!-- TODO: 列出 3-5 條設計亮點，每條一句話。
+     寫給「已經看上你的專案、想知道內部有沒有踩雷的人」。 -->
+
+-
+
+## 專案結構
+
+```
+{{project_name}}/
+├── README.md               # 你正在讀的這份
+├── CLAUDE.md               # AI 設計紅線索引（@import docs/design 細節）
+├── docs/
+│   ├── design/             # 為什麼這樣設計（修改前必讀的取捨）
+│   ├── examples/           # 可複製的設定範例
+│   ├── guides/             # 操作 how-to
+│   └── reference/          # 查表（檔案結構、env vars…）
+└── ...                     # TODO: 補上專案特定的目錄與檔
+```
+
+詳細結構速查見 [`docs/reference/file-layout.md`](docs/reference/file-layout.md)（TODO：自己建這檔）。
+
+## Quick start
+
+<!-- TODO: 安裝／啟動步驟。從零到「第一次能跑起來」的最短路徑。 -->

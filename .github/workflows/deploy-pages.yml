@@ -1,0 +1,35 @@
+# 官網（website/）發佈到 GitHub Pages（B0031）。
+#
+# repo 已轉 public、Pages source 已選 GitHub Actions（B0041 匯合點完成，
+# 2026-07-09）。push 觸發已解除註解：website/ 有改動即自動部署。
+name: deploy-pages
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["website/**"]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: website
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,34 @@
+# =========================================================
+# OpenSpec spec-framework add-on（base-agnostic）
+# =========================================================
+# Spec-driven 開發框架：proposal / specs / design / tasks 結構化，
+# 搭配 Claude Code 的 /opsx:propose|apply|archive slash commands 使用。
+# https://github.com/Fission-AI/OpenSpec
+#
+# 疊在任何 base image 上：開頭 `ARG BASE_IMAGE` + `FROM ${BASE_IMAGE}`，
+# 由 agent-sandbox 函式自動帶上 BASE_IMAGE / target tag。
+# 手動 build 範例：
+#   podman build -f Dockerfile.addon.openspec \
+#       --build-arg BASE_IMAGE=agent-sandbox-claude:latest \
+#       -t agent-sandbox-claude-openspec:latest .
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+# 版本控制：預設 @latest（保鮮），可 `--build-arg OPENSPEC_VERSION=0.5.0`
+# 釘版凍結里程碑用。實際裝的版本固化進 /etc/openspec-version，與 base
+# claude 的 /etc/claude-cli-version 機制對齊（見 docs/design/agent-sandbox.md
+# 「版本紀錄與查詢」）。
+ARG OPENSPEC_VERSION=latest
+
+# 要求 Node.js >= 20.19.0；base claude 用 node:22-slim 已符合。
+# npm install -g 預設裝到 /usr/local/lib/node_modules + symlink 進
+# /usr/local/bin，不會打到身分資料（$AGENT_HOME）或工具安裝區
+# （$AGENT_TOOLS，B0043 起 claude CLI 本體也在這裡）。
+RUN npm install -g @fission-ai/openspec@${OPENSPEC_VERSION} \
+    && openspec --version > /etc/openspec-version \
+    && echo "build date: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /etc/openspec-version
+
+# 靜態 LABEL：指路牌，真實版本以 /etc/openspec-version 為準（classic
+# builder 不支援動態 LABEL 內容，所以 LABEL 只當「去哪查」用）
+LABEL openspec.version-file="/etc/openspec-version"
