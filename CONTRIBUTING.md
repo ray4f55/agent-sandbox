@@ -27,7 +27,8 @@
 
 - Commit 訊息採 conventional 風格：`type(scope): 摘要`
   （`fix`／`feat`／`chore`／`docs`／`refactor`…），主體說明「為何」。
-- 從 `dev` 開分支作業，PR 對 `dev`（整合分支，通過驗證後才會合併進
+- 從 `dev` 開分支作業，分支名帶前綴表達類型（`feat/xxx` 新功能、
+  `bug/xxx` 修復），PR 對 `dev`（整合分支，通過驗證後才會合併進
   `main`）；勿直接 push 到 `main` 或 `dev`。
 - 使用**你自己的 git 身分**；不得冒用他人或與本人無關的帳號 email。
 - AI 協作的 commit 請附 `Co-Authored-By:` trailer 標明。

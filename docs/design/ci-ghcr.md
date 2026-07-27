@@ -31,17 +31,49 @@
 | 觸發 | GHCR tag |
 |---|---|
 | push `main` | `:latest`（rolling）+ `:sha-<short>` |
+| push `dev` | `:sha-<short>`（**不含** `:latest`，見下方「dev 驗證關卡」） |
 | push git tag `vX.Y.Z` | `:vX.Y.Z`（凍結） |
 
 由 `docker/metadata-action` 自動生成（`type=raw latest@default-branch` +
-`type=ref,event=tag` + `type=sha`）。
+`type=ref,event=tag` + `type=sha`）。`enable={{is_default_branch}}` 是
+`:latest` 只在 push 到 GitHub 設定的**預設分支**（目前是 `main`）才產生
+的關鍵——`dev` 不是預設分支，push 到它天然只會拿到 `:sha-<short>`，不會
+動到 `main` 使用者在拉的 `:latest`。
 
 **鏈一致性（對應「整鏈共用 image_tag」紅線）**：build addon 時
 `--build-arg BASE_IMAGE` **必須指向同一 tag 的 base**。tag push `v1.2.0` 時
 addon 要疊在 `agent-sandbox-claude:v1.2.0`（而非 `:latest`），否則 `v1.2.0`
-的 base/addon 鏈不一致。workflow 依 `github.ref_type` 推出 base ref（tag 用
-`github.ref_name`，其餘用 `latest`）。`addon` job `needs: base`，確保 base 先
-推上 GHCR，addon 的 `FROM ${BASE_IMAGE}` 才拉得到。
+的 base/addon 鏈不一致。workflow 依 `github.ref_type`／`github.ref_name`
+推出 base ref（tag 用 `github.ref_name`；`main` 用 `latest`；其餘分支——
+目前只有 `dev`——用 base job 剛推上去的 `:sha-<short>`）。`addon` job
+`needs: base`，確保 base 先推上 GHCR，addon 的 `FROM ${BASE_IMAGE}` 才拉
+得到。
+
+→ **紅線**：`addon` job 的 `basetag` 判斷式**不能**對 `main` 以外的分支
+一律 fallback 成 `latest`——那會讓該分支的 addon 疊在 `main` 已發布的舊
+base 上，不是這個分支自己剛建出來的 base，等於 CI 沒有真的驗證到這個
+分支的改動（B0045 加 `dev` 觸發時發現並修正這個邏輯漏洞）。日後若再加
+第三個會觸發 build 的分支，這條判斷式要跟著擴充，不能沿用舊的
+二分法（`main` / `else 全部當 latest`）。
+
+## dev 驗證關卡（B0045：三層分支模型的 CI 配套）
+
+`main`／`dev` 兩者都在 `on.push.branches` 觸發清單裡（原本只有 `main`）。
+目的：三層分支模型（`archive/*` 私人歷史 → `dev` 整合 → `main` 發布）
+上線後，`feat/xxx`／`bug/xxx` 的 PR 併進 `dev` 當下就能自動確認「整鏈
+build 得起來」，不用等到併進 `main` 才第一次發現壞掉——後者的代價是
+`main` 的 `:latest`（外部使用者實際在拉的）直接壞掉推出去。
+
+- **只加驗證，不改凍結／發布語意**：`dev` push 的圖片只有 `:sha-<short>`，
+  純粹是「這次 commit 建得起來」的證明，不是給外部使用者長期依賴的
+  tag，之後若刻意想清也不影響任何人。
+- **成本考量**：`platforms: linux/amd64,linux/arm64` 全套 QEMU 多架構
+  build，每次 PR 併進 `dev` 都會重跑一次（4 顆 image：{claude,codex} ×
+  {base,+openspec}，皆雙架構）——不是免費瞬間完成的操作，會佔用 Actions
+  分鐘數與等待時間。若日後覺得太慢，可考慮把 `dev` 的驗證改成單架構
+  （拿掉 arm64，只驗證 build 邏輯本身沒壞，不驗證跨架構相容性）或改用
+  `workflow_dispatch` 手動視情況觸發，而非每次 PR 都全套跑——**目前
+  維持全套跑**，之後真的變成瓶頸再降規格，不預先優化。
 
 ## 多架構作法：buildx + QEMU（單 job，簡單優先）
 
