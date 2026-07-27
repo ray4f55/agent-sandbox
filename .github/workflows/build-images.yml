@@ -6,7 +6,11 @@ name: build-images
 
 on:
   push:
-    branches: [main]
+    # main：正式發布（:latest + :sha-xxxx）。dev：三層分支模型（B0045）的
+    # CI 驗證關卡——merge PR 進 dev 時先確認整鏈 build 得起來，不用等到
+    # 併進 main 才發現壞掉；dev push 只產生 :sha-xxxx，不會動到 main 的
+    # :latest（見下方 metadata-action 的 enable={{is_default_branch}}）。
+    branches: [main, dev]
     tags: ['v*']
     # 只有 Dockerfile 或本 workflow 改動才 build（純文件改動不觸發）。
     paths:
@@ -94,13 +98,18 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # 鏈一致性（對應「整鏈共用 image_tag」紅線）：addon 要疊在「同一 tag」
-      # 的 base 上 —— tag push 用 vX.Y.Z，其餘（main / 手動）用 latest。
+      # 的 base 上 —— tag push 用 vX.Y.Z；main 用 latest；其餘分支（目前
+      # 只有 dev）用 base job 剛推上去的 :sha-xxxx，不能落回 latest——
+      # 那會疊在 main 已發布的舊 base 上，等於沒驗證到這個分支自己的改動
+      # （B0045 加 dev 觸發時發現並修正）。
       - id: basetag
         run: |
           if [ "${{ github.ref_type }}" = "tag" ]; then
             tag="${{ github.ref_name }}"
-          else
+          elif [ "${{ github.ref_name }}" = "main" ]; then
             tag="latest"
+          else
+            tag="sha-${GITHUB_SHA:0:7}"
           fi
           owner="${{ github.repository_owner }}"
           echo "ref=${REGISTRY}/${owner}/agent-sandbox-${{ matrix.base }}:${tag}" >> "$GITHUB_OUTPUT"
