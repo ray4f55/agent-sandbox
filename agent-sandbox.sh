@@ -20,6 +20,8 @@
 #                   亦可寫進 .agent-sandbox 的 [mount] 段（全域+專案累加）
 #   --identity    → 切換身分資料來源（對應 home/<name>/；預設 default，不存在→
 #                   報錯不自動建）。容器內身分路徑固定，只換 host 端來源。B0015
+#   --new-identity → 建立新身分骨架（home/<name>/...），純建立動作、不進容器、
+#                   不接受其他旗標；已存在也可執行，逐項回報狀態，冪等不覆蓋。B0046
 #   設定檔        → .agent-sandbox（key = value）：專案根放 [mount]/[image]，
 #                   工具目錄放全域 [mount]；容器 git 身分改編 home/<identity>/.gitconfig
 #   tab 可補完本地 image tag、Dockerfile.{base,addon}.*、home/<identity> 候選
@@ -55,6 +57,7 @@ _AGENT_SANDBOX_COMPOSE="$_AGENT_SANDBOX_DIR/docker-compose.yaml"
 
 # --- 參數解析 ---
 # 讀：$@／寫：image_tag base addons cli_mounts no_config_mounts launch upgrade
+#             new_identity
 # -h 印完 usage 後回傳 200（≠0 但非錯誤），主函式據此 return 0。
 _agent-sandbox-parse-args() {
     while (( $# )); do
@@ -70,6 +73,9 @@ _agent-sandbox-parse-args() {
             --identity)
                 [[ -z "$2" || "$2" == -* ]] && { echo "❌ --identity 需要值" >&2; return 1; }
                 identity="$2"; shift 2 ;;
+            --new-identity)
+                [[ -z "$2" || "$2" == -* ]] && { echo "❌ --new-identity 需要值" >&2; return 1; }
+                new_identity="$2"; shift 2 ;;
             -m|--mount)
                 [[ -z "$2" ]] && { echo "❌ $1 需要值（<host>[:<container>][:ro]）" >&2; return 1; }
                 cli_mounts+=("$2"); shift 2 ;;
@@ -80,6 +86,7 @@ _agent-sandbox-parse-args() {
             -h|--help)
                 cat <<'USAGE'
 用法: agent-sandbox [tag] [--upgrade] [--base <name>] [--addon <name>]... [-m <spec>]... [--identity <name>] [--launch]
+       agent-sandbox --new-identity <name>
 
   tag                  image tag（位置參數，預設 latest）。
                          純啟動模式：要跑哪個 tag —— 存在就跑、不存在報錯，
@@ -112,6 +119,14 @@ _agent-sandbox-parse-args() {
                        容器內身分路徑固定不變，只換 host 端來源；不存在的
                        identity 會報錯，不會自動建立資料夾（tab 補完可列現有
                        候選）。see docs/design/agent-sandbox.md「B0015」
+  --new-identity <name>
+                       建立一個新身分骨架（home/<name>/ 及其子目錄／檔案），
+                       純建立動作，不進容器、不接受其他旗標（--identity/
+                       --upgrade/--base/--addon/-m/--launch 一律報錯）。
+                       身分已存在也可執行，逐項列出「已存在」或「新建/
+                       補上」，天生冪等——可當健檢重跑，不會覆蓋既有內容。
+                       建完照常 agent-sandbox --identity <name> 啟動。
+                       see docs/design/agent-sandbox.md「B0046」
   --launch             進容器後自動啟動該 base 宣告的工具（claude base → claude），
                        工具退出後留在容器 bash 可續作業。base 須在其 Dockerfile
                        宣告 LABEL agent-sandbox.launch=<tool>，否則報錯。
@@ -152,6 +167,32 @@ _agent-sandbox-validate-upgrade-flags() {
     [[ -n "$no_config_mounts" ]] && rejected+=("--no-config-mounts")
     if (( ${#rejected[@]} > 0 )); then
         echo "❌ --upgrade 只接受 --base/--addon（純 build 操作，不碰 mount／identity／啟動行為）；不支援：${(j:、:)rejected}" >&2
+        return 1
+    fi
+}
+
+# --- 驗證 --new-identity 旗標白名單：純建立身分骨架，不接受其他旗標 ---
+# 讀：new_identity identity upgrade launch no_config_mounts cli_mounts base
+#     addons（皆主函式 local）
+# 紅線：--new-identity 跟 --upgrade 同一種「動作型、做完就結束」旗標，
+# 不該跟其他旗標混用——尤其 --identity（語意衝突：到底要建新的還是選
+# 舊的）、--upgrade（兩者都是「做完就結束」，同時給沒有意義）。也不接受
+# --base/--addon：身分與 image 變體正交，建身分不需要知道要跑哪個 base。
+# 必須在主函式 identity="${identity:-default}" 落定**之前**呼叫，否則
+# identity 永遠非空、每次 --new-identity 都會誤判成「有給 --identity」。
+# see docs/design/agent-sandbox.md「B0046」
+_agent-sandbox-validate-new-identity-flags() {
+    [[ -n "$new_identity" ]] || return 0
+    local -a rejected=()
+    [[ -n "$identity" ]] && rejected+=("--identity")
+    [[ -n "$upgrade" ]] && rejected+=("--upgrade")
+    [[ -n "$launch" ]] && rejected+=("--launch")
+    (( ${#cli_mounts[@]} > 0 )) && rejected+=("-m/--mount")
+    [[ -n "$no_config_mounts" ]] && rejected+=("--no-config-mounts")
+    [[ -n "$base" ]] && rejected+=("--base")
+    (( ${#addons[@]} > 0 )) && rejected+=("--addon")
+    if (( ${#rejected[@]} > 0 )); then
+        echo "❌ --new-identity 只接受身分名稱本身，是純建立動作；不支援：${(j:、:)rejected}" >&2
         return 1
     fi
 }
@@ -425,33 +466,62 @@ _agent-sandbox-ver-gt() {
 }
 
 # --- 容器內 git 身分：確保 home/<identity>/.gitconfig 存在（缺檔才 seed，永不覆蓋）---
-# 讀：identity（主函式 local）／（globals）_AGENT_SANDBOX_DIR
+# 參數：$1=要套用的 identity 名稱（省略→主函式目前的 $identity，動態作用域）；
+#       $2=verbose（1→逐項印「已存在/新建」狀態給 --new-identity 用；省略/0→
+#       維持原本「只在真的新建時才印一行」的安靜行為，日常啟動路徑不變）。
 # 紅線：podman 掛載找不到 host 來源會用 root 建 → 權限錯，故此檔必須在 run 前存在。
 # 規則：缺檔 → 從 host git global 身分建（host 沒設就建空檔 + 提示）；有檔（含空檔）
 # → 完全不碰。之後它就是你自己的標準 git 檔：改身分直接編它，或 per-repo
 # git config --local。要「不帶身分」就讓它空著（不會被回填）。init.sh --apply 安裝時
 # 做同一件事，此處是「沒跑 init / 被刪」的安全網。B0015 起套用到「目前選定的
-# identity」，不寫死 node/default。see docs/design/agent-sandbox.md
+# identity」，不寫死 node/default；B0046 起參數化＋支援 verbose，供
+# --new-identity 重用同一份邏輯。see docs/design/agent-sandbox.md
 _agent-sandbox-ensure-gitconfig() {
-    local repo_gitconfig="$_AGENT_SANDBOX_DIR/home/$identity/.gitconfig"
-    [[ -e "$repo_gitconfig" ]] && return 0          # 已存在（含空檔）→ 不碰
+    local target_identity="${1:-$identity}" verbose="${2:-0}"
+    local repo_gitconfig="$_AGENT_SANDBOX_DIR/home/$target_identity/.gitconfig"
+    if [[ -e "$repo_gitconfig" ]]; then                 # 已存在（含空檔）→ 不碰
+        (( verbose )) && printf '   %-13s 已存在，未變動\n' ".gitconfig"
+        return 0
+    fi
     local gname gemail
     gname=$(git config --global user.name 2>/dev/null)
     gemail=$(git config --global user.email 2>/dev/null)
-    mkdir -p "${repo_gitconfig:h}"
+    mkdir -p "${repo_gitconfig:h}" || { echo "❌ 無法建立 ${repo_gitconfig:h}" >&2; return 1; }
+    # 回報成功訊息前先確認寫檔真的成功——不能無條件宣稱「已建立」，
+    # 那會比安靜不報更糟（明確違反「不可默默做掉」：印一個假的成功
+    # 訊息比什麼都不印還誤導）。
     if [[ -n "$gname" && -n "$gemail" ]]; then
-        printf '[user]\n\tname = %s\n\temail = %s\n' "$gname" "$gemail" > "$repo_gitconfig"
-        echo "📝 首次生成 home/$identity/.gitconfig（帶入 host 身分：$gname <$gemail>）"
+        if printf '[user]\n\tname = %s\n\temail = %s\n' "$gname" "$gemail" > "$repo_gitconfig"; then
+            if (( verbose )); then
+                printf '   %-13s 🆕 已建立（帶入 host 身分：%s <%s>）\n' ".gitconfig" "$gname" "$gemail"
+            else
+                echo "📝 首次生成 home/$target_identity/.gitconfig（帶入 host 身分：$gname <$gemail>）"
+            fi
+        else
+            echo "❌ 無法寫入 $repo_gitconfig" >&2
+            return 1
+        fi
     else
-        : > "$repo_gitconfig"   # 空檔：保證掛載來源存在（避免 podman root 建）
-        echo "⚠️  host 未設 git global user.name/email；已建空的 home/$identity/.gitconfig，容器內 git commit 將無身分。"
-        echo "    設好 host git config --global 後刪掉該空檔重跑可自動帶入，或直接編輯它填身分。"
+        if : > "$repo_gitconfig"; then   # 空檔：保證掛載來源存在（避免 podman root 建）
+            if (( verbose )); then
+                printf '   %-13s 🆕 已建立（空檔，host 未設 git 身分）\n' ".gitconfig"
+            else
+                echo "⚠️  host 未設 git global user.name/email；已建空的 home/$target_identity/.gitconfig，容器內 git commit 將無身分。"
+                echo "    設好 host git config --global 後刪掉該空檔重跑可自動帶入，或直接編輯它填身分。"
+            fi
+        else
+            echo "❌ 無法建立 $repo_gitconfig" >&2
+            return 1
+        fi
     fi
 }
 
-# --- 啟動前置：mise-cache volume + 容器內 git identity ---
-# 讀：identity（主函式 local）／（globals）_AGENT_SANDBOX_DIR
+# --- 啟動前置：mise-cache volume + 容器內身分骨架（.claude/.codex/.config/mise/.ssh/.claude.json/.gitconfig）---
+# 參數：$1=要套用的 identity 名稱（省略→主函式目前的 $identity）；
+#       $2=verbose（1→逐項回報，供 --new-identity 用；省略/0→安靜，日常啟動不變）。
 _agent-sandbox-ensure-prereqs() {
+    local target_identity="${1:-$identity}" verbose="${2:-0}"
+
     # 確保 mise-cache volume 存在（compose external，不自動建；冪等）
     # see docs/design/docker-compose.md 的 mise-cache 章節
     podman volume inspect agent-sandbox-mise-cache >/dev/null 2>&1 \
@@ -460,12 +530,23 @@ _agent-sandbox-ensure-prereqs() {
     # bind mount 的 host 來源目錄缺時 podman 會用 root 建 → 容器內權限錯
     # （README「主機端防錯設定」紅線）。冪等補齊 compose 掛的四個子目錄
     # （init.sh --apply 也建預設 identity 的部分；此處是沒跑 init／用了
-    # 非預設 identity 的安全網，比照 gitconfig）。B0015 起加 .ssh、且套用
-    # 到目前選定的 identity（--identity 未給則已在主函式落定為 default）。
-    mkdir -p "$_AGENT_SANDBOX_DIR/home/$identity/.claude" \
-             "$_AGENT_SANDBOX_DIR/home/$identity/.codex" \
-             "$_AGENT_SANDBOX_DIR/home/$identity/.config/mise" \
-             "$_AGENT_SANDBOX_DIR/home/$identity/.ssh"
+    # 非預設 identity 的安全網，比照 gitconfig）。B0015 起加 .ssh；B0046 起
+    # 逐項檢查存在與否（而非無條件 mkdir -p），verbose 模式下才報得出
+    # 「本來就在」vs「這次新建」，日常啟動（verbose=0）不受影響。
+    local target_home="$_AGENT_SANDBOX_DIR/home/$target_identity"
+    local -a subdirs=(.claude .codex .config/mise .ssh)
+    local d dpath
+    for d in "${subdirs[@]}"; do
+        dpath="$target_home/$d"
+        if [[ -d "$dpath" ]]; then
+            (( verbose )) && printf '   %-13s 已存在，未變動\n' "$d"
+        elif mkdir -p "$dpath"; then
+            (( verbose )) && printf '   %-13s 🆕 已建立\n' "$d"
+        else
+            echo "❌ 無法建立 $dpath" >&2
+            return 1
+        fi
+    done
 
     # .claude.json 是「檔案」掛載（跟上面四個資料夾掛載不同）：podman 對
     # 缺失的 bind mount 來源一律自動建成資料夾，不會建成檔案——缺這個檔
@@ -473,10 +554,35 @@ _agent-sandbox-ensure-prereqs() {
     # 任何預期讀寫 JSON 的工具會直接壞掉。之前只有 init.sh 幫 default 身
     # 分補過這個檔案，其他身分完全沒人補；比照 .gitconfig 的做法，補到
     # 這個每次啟動都跑的安全網，涵蓋所有 identity。
-    local claude_json="$_AGENT_SANDBOX_DIR/home/$identity/.claude.json"
-    [[ -e "$claude_json" ]] || touch "$claude_json"
+    local claude_json="$target_home/.claude.json"
+    if [[ -e "$claude_json" ]]; then
+        (( verbose )) && printf '   %-13s 已存在，未變動\n' ".claude.json"
+    elif touch "$claude_json"; then
+        (( verbose )) && printf '   %-13s 🆕 已建立\n' ".claude.json"
+    else
+        echo "❌ 無法建立 $claude_json" >&2
+        return 1
+    fi
 
-    _agent-sandbox-ensure-gitconfig
+    _agent-sandbox-ensure-gitconfig "$target_identity" "$verbose"
+}
+
+# --- --new-identity 的實際動作：建立身分骨架，逐項回報，不進容器 ---
+# 參數：$1=要建立的 identity 名稱
+# 紅線：不管身分本來就存在還是全新建立，六個子項（.claude/.codex/
+# .config/mise/.ssh/.claude.json/.gitconfig）都要逐條列出狀態，不可以
+# 有任何一步默默做掉（呼應本專案「隱形狀態必須可見」的一貫紅線，見
+# 「額外掛載」章節同一種立場）。底層操作天生冪等，身分已存在時重跑
+# 此指令等同一次健檢/補齊，不會覆蓋既有內容。see docs/design/agent-sandbox.md「B0046」
+_agent-sandbox-create-identity() {
+    local target_identity="$1"
+    echo "🔍 檢查身分 home/$target_identity/："
+    if _agent-sandbox-ensure-prereqs "$target_identity" 1; then
+        echo "✅ 身分 $target_identity 已就緒。下一步：agent-sandbox --identity $target_identity"
+    else
+        echo "❌ 身分 $target_identity 未完全建立成功，見上方錯誤訊息" >&2
+        return 1
+    fi
 }
 
 # --- Build 鏈（雙模）：run 永不 build；--upgrade 是唯一 build 入口 ---
@@ -648,6 +754,7 @@ agent-sandbox() {
     local image_tag="latest"
     local base=""                     # 空=CLI 未指定；與專案 [image] 段合成後落定（皆無 → claude）
     local identity=""                 # 空=CLI 未指定；主函式內落定為 default（B0015）
+    local new_identity=""             # --new-identity：建立身分骨架，純動作、不進容器（B0046）
     local launch=""                   # --launch：進容器自動啟動該 base 宣告的工具
     local upgrade=""                  # --upgrade：唯一 build 入口（run 永不 build）
     local no_config_mounts=""         # --no-config-mounts：本次忽略設定檔 mount
@@ -660,8 +767,19 @@ agent-sandbox() {
         *)   return 1 ;;
     esac
 
-    # 必須在 identity 落定為 default 之前檢查（見該 helper 頭註）
+    # 必須在 identity 落定為 default 之前檢查（見各 helper 頭註，兩者
+    # 皆是「動作型旗標」的白名單，同一種順序要求）
     _agent-sandbox-validate-upgrade-flags || return 1
+    _agent-sandbox-validate-new-identity-flags || return 1
+
+    # --new-identity 在這裡就分岔掉，完全不進入後續 identity/base/addon/
+    # mount/build 主線——比 --upgrade 分岔得更早（--upgrade 好歹要跑
+    # validate-variant 才知道要 build 哪條鏈；--new-identity 連這步都不用，
+    # 身分與 image 變體正交）。見 docs/design/agent-sandbox.md「B0046」
+    if [[ -n "$new_identity" ]]; then
+        _agent-sandbox-create-identity "$new_identity"
+        return $?
+    fi
 
     # 無 CLI 指定 → default（B0015；跟 base 的「無 CLI 且無檔案設定 → claude」
     # 同一種「有明確落定值」原則，這裡沒有設定檔層，直接落定）
@@ -714,9 +832,11 @@ agent-sandbox() {
     # 同上：ensure-prereqs 會 mkdir home/$identity/... 並在缺檔時 seed
     # gitconfig —— 若在 --upgrade 也跑，打錯字的 --identity 會在純 build
     # 操作裡被靜默建出一個新身分資料夾（違反「未知 identity 一律
-    # fail-fast、不自動建」的設計，見上方 validate-identity）
+    # fail-fast、不自動建」的設計，見上方 validate-identity）。verbose
+    # 明確傳 0：日常啟動維持安靜，逐項回報只在 --new-identity 開啟
+    # （B0046；那條路徑走 --new-identity 的分岔，不會經過這裡）。
     if [[ -z "$upgrade" ]]; then
-        _agent-sandbox-ensure-prereqs || return 1
+        _agent-sandbox-ensure-prereqs "$identity" 0 || return 1
     fi
 
     local prev_image
@@ -782,6 +902,7 @@ _agent-sandbox() {
         '*'{-m,--mount}'[額外掛載 host 路徑（可多次）]:mount spec:_files' \
         '(--no-config-mounts)--no-config-mounts[本次忽略設定檔 mount，只用 -m]' \
         '(--identity)--identity[切換身分資料來源（預設 default）]:identity:->identities' \
+        '(--new-identity)--new-identity[建立新身分骨架，純動作不進容器]:new identity name:' \
         '(--launch)--launch[進容器自動啟動該 base 宣告的工具]' \
         '(--upgrade)--upgrade[重建整鏈並更新工具到最新（自動留版號快照；只 build 不進容器）]' \
         '1:image tag:->tags'
