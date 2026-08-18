@@ -2,9 +2,11 @@
 # .agent-sandbox —— 設定檔範例（每行 key = value，重複 key 視為清單）
 #
 # 像 git config 一樣分兩處：
-#   專案根（本檔）              → [mount]（額外掛載）、[image]（預設 base/addon）
+#   專案根（本檔）              → [mount]（額外掛載）、[image]（預設 base/addon）、
+#                                [identity]（預設身分）
 #   agent-sandbox 工具目錄      → [mount]（每個 sandbox 都想掛的全域路徑）
-# [image] 只認專案層（放工具目錄會 ⚠️ 略過）；未知段前向相容略過；段標頭獨佔一行。
+# [image]／[identity] 只認專案層（放工具目錄會 ⚠️ 略過）；未知段前向相容略過；
+# 段標頭獨佔一行（可帶行內註解，但註解前要有空白才會被剝除）。
 # 容器 git 身分不在這裡 —— 是 home/<identity>/.gitconfig（標準 git 檔，預設
 # 身分是 home/default/.gitconfig），見 README「多身分」段。
 #
@@ -63,6 +65,12 @@
 #
 # base = claude          # 預設就是 claude，通常不用寫
 # addon = openspec       # 可重複多行依序疊層
+
+[identity]
+# 逐專案預設身分 —— 這個專案本質上就該用哪個 home/<name>/。
+# --identity 蓋過它（單值覆蓋，跟 base 同一套規則）。同樣只認專案層。
+#
+# identity = ops         # 例：管雲端主機的專案固定用 ops 身分
 
 # ============================================================
 # 全域 [mount]（每個專案都想掛的共用資料夾）—— 放「agent-sandbox 工具目錄」

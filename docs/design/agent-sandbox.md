@@ -507,6 +507,63 @@ daemon，本來就需要處理命名空間映射，順便做了這個補紀錄�
 
 （原追蹤於 B0044，2026-07-21 落地、實機驗證、三組對照實驗定位觸發源頭。）
 
+## 容器內 SSH client 找錯 `~/.ssh` 路徑（系統層級 ssh_config，B0050）
+
+對應檔：`entrypoint.sh`（`/etc/ssh/ssh_config` 動態產生區塊）、
+`Dockerfile.base.*` 的 `RUN chmod 666 /etc/passwd /etc/group
+/etc/ssh/ssh_config`。
+
+### 問題：上一節「已知環境相依限制」原本沒預料到的具體後果
+
+上一節記載的 podman/macOS 限制（podman 搶先補的 passwd 紀錄 `pw_dir`
+指向 `--workdir` 而非 `$HOME`）原本只評估影響 `whoami`／身分可視化。
+實機驗證發現真正後果更嚴重：**OpenSSH client 對 `~/.ssh/id_*`、
+`~/.ssh/known_hosts`，甚至它自己找 `~/.ssh/config` 這個內建預設行為，
+走的都是 `getpwuid()` 的 `pw_dir`，不是 `$HOME` 環境變數**。`pw_dir`
+錯了，SSH 就會去 `/workspace/<專案>/.ssh/` 找——不只找不到金鑰、退回
+密碼登入，還會把新學到的 host key 意外寫進使用者的專案 workspace
+（實測過寫出 `<專案>/.ssh/known_hosts`）。`gcloud compute ssh` 不受
+影響（Python 的 `~` 展開走 `$HOME` 環境變數，不同機制）。
+
+### 解法：系統層級 `/etc/ssh/ssh_config`，動態掃描身分 `.ssh/` 資料夾
+
+`entrypoint.sh` 每次容器啟動動態產生一段 `Host *`：
+
+- **動態掃描 `${HOME}/.ssh/` 內所有檔案生成 `IdentityFile`**（排除
+  `.pub`／`known_hosts`／`known_hosts2`／`config`／`authorized_keys`），
+  不寫死固定檔名——使用者的金鑰可能自訂命名（不在 SSH 內建那七個
+  預設檔名之列），寫死清單解決不了這個情境。
+- **`Include ${HOME}/.ssh/config`**（僅檔案存在才加）：讓使用者自己
+  在身分資料夾寫的個人化 `Host` 別名設定（`HostName`／`Port`／`User`
+  捷徑）也能在容器內生效——SSH 自己找 `~/.ssh/config` 這個內建行為
+  同樣中招，不能只靠使用者自己建檔就會被讀到。
+- **`UserKnownHostsFile ${HOME}/.ssh/known_hosts ${HOME}/.ssh/known_hosts2`**：
+  修正 host key 學習位置，對應原始症狀（意外寫進專案 workspace）的
+  直接修正。
+
+**為何不修 `/etc/passwd` 的 `pw_dir`（而是繞道系統層級 ssh_config）**：
+上一節已明確決定「podman 補的既有紀錄不覆寫」（未知連鎖風險），本次
+不重新翻案這個決策——`/etc/ssh/ssh_config` 用絕對路徑寫死，完全不經過
+`~` 展開，不管 `pw_dir` 對不對都恆定生效，改動侷限、風險最小。
+
+**寫入權限**：`entrypoint.sh` 以非 root UID 執行，`/etc/ssh/ssh_config`
+預設 root 擁有——沿用上一節同一行 `RUN chmod 666 /etc/passwd
+/etc/group`，一併加上 `/etc/ssh/ssh_config`（同一套已評估過的安全
+論證：`cap_drop: ALL` + `no-new-privileges` 已堵死唯一理論提權路徑）。
+
+**使用者自己 config 檔裡的路徑仍要用絕對路徑**：`Include` 只解決「這
+個檔案找不找得到」，檔案**內容**裡如果寫 `IdentityFile ~/.ssh/xxx`，
+這個 `~` 在被實際使用的當下仍會重新觸發同一個展開機制、同樣找錯地方
+——`Include` 不會連帶修好使用者自己寫的相對路徑，這點無法從系統層級
+根治，只能靠文件／README 提醒。
+
+→ **紅線**：改這段邏輯要保持「不碰 `/etc/passwd`」「動態掃描不寫死
+檔名清單」「系統 ssh_config 用絕對路徑」三個結構性選擇；`gcloud
+compute ssh` 不受這個 bug 影響，不需要這個修法涵蓋它。
+
+（原追蹤於 B0050，2026-08-18 於 B0047 驗證過程發現、確認根因、落地並
+實機驗證。）
+
 ## 身分資料與工具安裝路徑分離（`$AGENT_HOME` / `$AGENT_TOOLS`）
 
 對應檔：兩個 `Dockerfile.base.*` 開頭的 `ARG AGENT_HOME` / `ARG
@@ -731,7 +788,9 @@ fallback 值語意一致（`AGENT_SANDBOX_IDENTITY:-default`）。B0015 落地�
   `.ssh` 沒有理由被特殊對待。`home/default/.ssh` 留空即可，無害。
 - **`.agent-sandbox` 的 `[mount]` / `[image]`**：身分與這兩段完全
   正交——`--identity` 只決定身分資料來源，不影響額外掛載或 base/addon
-  選擇，三者可任意組合。
+  選擇，三者可任意組合。（`[identity]` 段是例外——它本來就是設定
+  identity 用的，見下方「逐專案預設身分」小節，不算違反這條正交性，
+  只是同一個維度換一種輸入方式。）
 
 **檔案型 vs 資料夾型掛載來源都要主動補、不能只補資料夾**（2026-07-24 使用
 者實機測試 `--identity ops` 時發現）：`.claude`／`.codex`／`.config/mise`／
@@ -756,6 +815,54 @@ fail-fast、不自動建立；`--upgrade` 不做身分驗證；身分可視化�
 命名（`--identity`，含 Tab 補全）與容器內路徑固定不變兩項關鍵決策，
 同日開始實作：`home/node/` 更名 `home/default/`、compose 多身分掛載、
 函式 `--identity` 旗標與驗證、Tab 補全、身分可視化 banner/PS1。）
+
+### 逐專案預設身分（`.agent-sandbox` 的 `[identity]` 段，B0049）
+
+B0015 落地當時刻意先不做「`.agent-sandbox` project-level 預設身分」
+（YAGNI——「你是誰」比較像使用者屬性，等真的有反覆手動打 `--identity`
+的痛點再加）。B0047 之後這個痛點真的出現了：`ai-ops` 這類專案本質上
+就是要用固定身分（如 `ops`）管雲端主機，每次手動打 `--identity ops`
+是真實反覆的操作，觸發本項落地。
+
+**獨立 `[identity]` 段，不塞進 `[image]`**：`[image]` 段語意單純只管
+「image 變體」，混進身分會模糊「身分與 image 變體正交」這條既有結論
+（見上方「與既有機制的關係」）。鍵名 `identity =`——跟 CLI 旗標同一個
+詞，不必多記一套對應詞彙；`[identity]` 段只有這一個鍵，用段名當鍵名
+不會有歧義。
+
+**專案 only，比照 `[image]`**：「這個專案該用哪個身分」是專案屬性
+（跟「這個專案要哪個 base」同一種問法），不是使用者全域偏好；全域層
+目前沒有具體需求支撐，開放只會重演 `[image]` 當初「1 base/1 addon、
+零價值＝YAGNI」的同款過度設計，放全域層會被 lint 警告並略過（跟
+`[image]` 同一套「未知/誤放段落」健檢機制）。
+
+**合成規則跟 `base` 完全同構**：單值覆蓋，`--identity` > 檔案
+`identity` > 內建 `default`。落定時機仿照 `base`——`local identity=""`
+一路留空，直到 `_agent-sandbox-apply-identity-config` 這個函式裡才
+真正決定（CLI 有給就用 CLI、否則用檔案值、都沒有才落 `default`），
+不在主函式一開始就提早 `identity="${identity:-default}"`（B0015 原本
+這樣寫，因為那時候還沒有設定檔層；B0049 起這樣寫會讓檔案值永遠贏不了
+提早寫死的 `default`，所以連帶把這行拿掉，改到 apply 函式裡收尾）。
+
+**與 `--upgrade`／`--new-identity` 白名單檢查的耦合（本項最容易踩雷
+的一點）**：`_agent-sandbox-validate-upgrade-flags`／
+`_agent-sandbox-validate-new-identity-flags` 用「`$identity` 是否非空」
+判斷「使用者是否有給 `--identity`」，藉此擋 `--upgrade --identity x`
+這類旗標衝突。這兩個檢查的呼叫時機必須維持在
+`_agent-sandbox-apply-identity-config`（讀 `[identity]` 段、把檔案值
+寫進 `$identity`）**之前**，且 `_agent-sandbox-apply-identity-config`
+本身整段包在 `if [[ -z "$upgrade" ]]` 內，`--upgrade` 模式完全不呼叫
+它——否則單純因為在帶 `[identity]` 段的專案資料夾下跑 `--upgrade`，
+就會被誤判成「有給 --identity」而報錯拒絕，這是實作時故意留設計
+紀錄提醒的坑，別在後續改動時把呼叫順序打亂。
+
+→ **紅線**：`identity` 的落定邏輯必須留在
+`_agent-sandbox-apply-identity-config` 內（不要在主函式提早寫死
+`default`）；`--upgrade`／`--new-identity` 的旗標白名單檢查必須早於
+這個函式呼叫；`[identity]` 維持專案 only，全域層開放前需另外評估
+（同 `[image]` 的 YAGNI 判斷基準）。
+
+（原追蹤於 B0049，2026-08-18 拍板並落地、實機驗證通過。）
 
 ## 建立新身分（`--new-identity`，B0046）
 

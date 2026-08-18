@@ -22,7 +22,7 @@
 #                   報錯不自動建）。容器內身分路徑固定，只換 host 端來源。B0015
 #   --new-identity → 建立新身分骨架（home/<name>/...），純建立動作、不進容器、
 #                   不接受其他旗標；已存在也可執行，逐項回報狀態，冪等不覆蓋。B0046
-#   設定檔        → .agent-sandbox（key = value）：專案根放 [mount]/[image]，
+#   設定檔        → .agent-sandbox（key = value）：專案根放 [mount]/[image]/[identity]，
 #                   工具目錄放全域 [mount]；容器 git 身分改編 home/<identity>/.gitconfig
 #   tab 可補完本地 image tag、Dockerfile.{base,addon}.*、home/<identity> 候選
 # 最終 image：agent-sandbox-<base>[-<addon1>][-<addon2>]:<tag>
@@ -137,6 +137,7 @@ _agent-sandbox-parse-args() {
 .agent-sandbox 設定檔（每行 key = value，重複 key 視為清單）：
   專案根   [mount] path = <spec>（額外掛載；inherit-global = false 可不繼承全域）
            [image] base = <name> / addon = <name>（逐專案預設；CLI 優先、addon 疊加）
+           [identity] identity = <name>（逐專案預設身分；CLI 優先，單值覆蓋）
   工具目錄 [mount]（全域額外掛載；路徑須絕對/~，每個 sandbox 都會掛）
   全域 + 專案 + CLI 的 mount 全部累加。容器 git 身分改為直接編
   home/<identity>/.gitconfig（預設 identity 是 home/default/.gitconfig）。
@@ -155,9 +156,11 @@ USAGE
 # 讀：upgrade identity launch no_config_mounts cli_mounts（皆主函式 local）
 # 紅線：--upgrade 是純 build 操作，run/build 分家——不只「這些旗標的解析
 # 結果」不該生效，連「使用者是否給了這些旗標」本身都該直接拒絕，而不是
-# 靜默忽略（呼應這個專案一貫的 fail-fast 立場）。必須在主函式
-# identity="${identity:-default}" 落定**之前**呼叫，否則 identity 永遠
-# 非空、每次 --upgrade 都會誤判成「有給 --identity」。
+# 靜默忽略（呼應這個專案一貫的 fail-fast 立場）。必須在
+# _agent-sandbox-apply-identity-config 落定 identity（CLI／檔案／預設
+# 三選一）之前呼叫，否則 identity 永遠非空、每次 --upgrade 都會誤判
+# 成「有給 --identity」（B0049 起 identity 也可能來自 [identity] 段，
+# 不只 CLI，但這個檢查只該擋 CLI 給的值，順序必須早於檔案值合成）。
 _agent-sandbox-validate-upgrade-flags() {
     [[ -n "$upgrade" ]] || return 0
     local -a rejected=()
@@ -178,8 +181,9 @@ _agent-sandbox-validate-upgrade-flags() {
 # 不該跟其他旗標混用——尤其 --identity（語意衝突：到底要建新的還是選
 # 舊的）、--upgrade（兩者都是「做完就結束」，同時給沒有意義）。也不接受
 # --base/--addon：身分與 image 變體正交，建身分不需要知道要跑哪個 base。
-# 必須在主函式 identity="${identity:-default}" 落定**之前**呼叫，否則
-# identity 永遠非空、每次 --new-identity 都會誤判成「有給 --identity」。
+# 必須在 _agent-sandbox-apply-identity-config 落定 identity 之前呼叫，
+# 否則 identity 永遠非空、每次 --new-identity 都會誤判成「有給
+# --identity」（同上方 validate-upgrade-flags 的順序要求，B0049 起）。
 # see docs/design/agent-sandbox.md「B0046」
 _agent-sandbox-validate-new-identity-flags() {
     [[ -n "$new_identity" ]] || return 0
@@ -198,16 +202,19 @@ _agent-sandbox-validate-new-identity-flags() {
 }
 
 # --- 設定檔 INI 段落讀取（通用，.agent-sandbox 兩層共用）---
-# 參數：$1=檔案路徑 $2=段名；stdout 逐行輸出該段的非空非註解行（已去前導空白）。
-# 段標頭 [name] 須獨佔一行；只取要的段 → 未知段天然略過（前向相容，B0024 起）。
-# 行格式由各 caller 解析（皆為 key = value）。檔不存在 → 無輸出、return 0。
-# see docs/design/agent-sandbox.md「兩層設定檔」
+# 參數：$1=檔案路徑 $2=段名；stdout 逐行輸出該段的非空非註解行（已去前導/尾端空白、
+# 行內註解）。段標頭 [name] 須獨佔一行（可帶行內註解）；只取要的段 → 未知段天然
+# 略過（前向相容，B0024 起）。行格式由各 caller 解析（皆為 key = value）。檔不
+# 存在 → 無輸出、return 0。行內註解只認「前面有空白的 #」（避免誤傷值本身含 #
+# 但無空白緊鄰的情況，如路徑）。see docs/design/agent-sandbox.md（B0048）
 _agent-sandbox-config-lines() {
     local file="$1" want="$2"
     local line stripped section=""
     [[ -f "$file" ]] || return 0
     while IFS= read -r line || [[ -n "$line" ]]; do
         stripped="${line#"${line%%[![:space:]]*}"}"   # 去前導空白
+        stripped="${stripped%% \#*}"                    # 剝除行內註解（見上方 B0048）
+        stripped="${stripped%"${stripped##*[![:space:]]}"}"   # 去尾端空白（含註解剝除後殘留）
         [[ -z "$stripped" || "$stripped" == \#* ]] && continue
         if [[ "$stripped" == \[*\] ]]; then           # [section] 標頭（須獨佔一行）
             section="${stripped#\[}"; section="${section%\]}"
@@ -220,19 +227,23 @@ _agent-sandbox-config-lines() {
 
 # --- 設定檔健檢：段落放錯層 / 已移除段 提示（純提醒，不影響解析）---
 # 參數：$1=檔案 $2=scope（global|project）
-# [git] 已移除（任何層都提醒改編 home/<identity>/.gitconfig）；[image] 僅專案層（放全域提醒）；
-# [mount] 兩層皆可；未知段靜默（前向相容）。see docs/design/agent-sandbox.md
+# [git] 已移除（任何層都提醒改編 home/<identity>/.gitconfig）；[image]/[identity]
+# 僅專案層（放全域提醒）；[mount] 兩層皆可；未知段靜默（前向相容）。標頭判斷比照
+# config-lines 去尾端空白/行內註解，兩處保持一致（B0048）。see docs/design/agent-sandbox.md
 _agent-sandbox-lint-config() {
     local file="$1" scope="$2"
     [[ -f "$file" ]] || return 0
     local line sec
     while IFS= read -r line || [[ -n "$line" ]]; do
         line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%% \#*}"
+        line="${line%"${line##*[![:space:]]}"}"
         [[ "$line" == \[*\] ]] || continue
         sec="${line#\[}"; sec="${sec%\]}"; sec="${sec//[[:space:]]/}"
         case "$sec" in
             git)   echo "⚠️  $file 的 [git] 段已移除：容器 git 身分改為直接編輯 home/<identity>/.gitconfig（見 docs/guides/upgrade-two-layer-config.md），本段略過" >&2 ;;
             image) [[ "$scope" == global ]] && echo "⚠️  $file 的 [image] 段僅支援專案層，已略過" >&2 ;;
+            identity) [[ "$scope" == global ]] && echo "⚠️  $file 的 [identity] 段僅支援專案層，已略過（B0049）" >&2 ;;
         esac
     done < "$file"
 }
@@ -275,6 +286,36 @@ _agent-sandbox-apply-image-config() {
     return 0
 }
 
+# --- 專案 [identity] 段：逐專案預設身分，與 CLI 合成 ---
+# 讀：identity（CLI 原值；空=未指定）／寫：identity identity_from_file
+# 優先序：CLI --identity > 檔案 identity= > 內建 default（單值覆蓋，同 base 的合成
+# 規則）。呼叫時機必須晚於 validate-upgrade-flags／validate-new-identity-flags
+# （那兩個檢查只該擋 CLI 給的值，見各自頭註）；--upgrade 模式下主函式不呼叫本
+# 函式（身分與純 build 操作無關）。see docs/design/agent-sandbox.md（B0049）
+_agent-sandbox-apply-identity-config() {
+    local config_file="$PWD/.agent-sandbox"
+    local -a id_lines=()
+    local file_identity="" line key val
+    id_lines=(${(f)"$(_agent-sandbox-config-lines "$config_file" identity)"})
+    for line in "${id_lines[@]}"; do
+        key="${line%%=*}"; key="${key//[[:space:]]/}"
+        val="${line#*=}"
+        [[ "$val" == "$line" ]] && val=""              # 無 '=' 的行
+        val="${val#"${val%%[![:space:]]*}"}"; val="${val%"${val##*[![:space:]]}"}"
+        case "$key" in
+            identity) file_identity="$val" ;;
+            *) echo "⚠️  $config_file [identity] 段未知鍵 '$key'，略過" >&2 ;;
+        esac
+    done
+    # identity：CLI 未指定才用檔案值（單值覆蓋，同 base）
+    if [[ -z "$identity" && -n "$file_identity" ]]; then
+        identity="$file_identity"; identity_from_file=1
+        echo "📄 讀取 $config_file（[identity] 段：identity=$identity）"
+    fi
+    [[ -z "$identity" ]] && identity="default"   # 無 CLI 且無檔案設定 → 內建預設（B0015）
+    return 0
+}
+
 # --- 驗證 --base/--addon + 推導最終 image 名 ---
 # 讀：base addons compose_dir base_from_file addons_from_file／寫：base_df image_name
 _agent-sandbox-validate-variant() {
@@ -313,15 +354,18 @@ _agent-sandbox-validate-variant() {
 }
 
 # --- 驗證 --identity：home/<identity>/ 必須已存在（fail-fast，不默默生資料夾）---
-# 讀：identity compose_dir
+# 讀：identity compose_dir identity_from_file
 # 紅線：跟 --base/--addon/tag 同一套「純 run 不默默生東西」原則——不存在的
 # identity 直接報錯，不自動 mkdir（要新增身分，使用者自己先建
 # home/<name>/，或至少留一個空 .gitconfig／讓下面 ensure 補齊子檔）。
-# see docs/design/agent-sandbox.md「B0015」
+# 值來自 .agent-sandbox 時錯誤附註來源（同 validate-variant 的 base_src 模式，
+# 使用者沒打 --identity 卻看到這個錯會困惑，B0049）。see docs/design/agent-sandbox.md「B0015」
 _agent-sandbox-validate-identity() {
     local identity_dir="$compose_dir/home/$identity" f
+    local identity_src=""
+    [[ -n "$identity_from_file" ]] && identity_src="，來自 $PWD/.agent-sandbox [identity] 段"
     if [[ ! -d "$identity_dir" ]]; then
-        echo "❌ 未知 --identity: $identity（找不到 $identity_dir）" >&2
+        echo "❌ 未知 --identity: $identity（找不到 $identity_dir$identity_src）" >&2
         local -a avail
         for f in "$compose_dir"/home/*(N/); do
             avail+=("${f:t}")
@@ -777,7 +821,8 @@ _agent-sandbox-cleanup-network() {
 agent-sandbox() {
     local image_tag="latest"
     local base=""                     # 空=CLI 未指定；與專案 [image] 段合成後落定（皆無 → claude）
-    local identity=""                 # 空=CLI 未指定；主函式內落定為 default（B0015）
+    local identity=""                 # 空=CLI 未指定；與專案 [identity] 段合成後落定
+                                       # （皆無 → default，B0015；B0049 起可來自設定檔）
     local new_identity=""             # --new-identity：建立身分骨架，純動作、不進容器（B0046）
     local launch=""                   # --launch：進容器自動啟動該 base 宣告的工具
     local upgrade=""                  # --upgrade：唯一 build 入口（run 永不 build）
@@ -805,15 +850,11 @@ agent-sandbox() {
         return $?
     fi
 
-    # 無 CLI 指定 → default（B0015；跟 base 的「無 CLI 且無檔案設定 → claude」
-    # 同一種「有明確落定值」原則，這裡沒有設定檔層，直接落定）
-    identity="${identity:-default}"
-
     # compose 目錄＝本檔所在目錄（自我定位，見檔頭）
     local compose_dir="$_AGENT_SANDBOX_DIR"
 
     # 設定檔健檢（段落放錯層 / 已移除段）。同檔（從工具目錄自身啟動）只當專案檢，
-    # 因為那份檔同時是專案檔、[image] 在它裡面是合法的。
+    # 因為那份檔同時是專案檔、[image]/[identity] 在它裡面是合法的。
     local _gf="$compose_dir/.agent-sandbox" _pf="$PWD/.agent-sandbox"
     if [[ "$_pf" == "$_gf" ]]; then
         _agent-sandbox-lint-config "$_pf" project
@@ -829,9 +870,13 @@ agent-sandbox() {
     local base_df image_name
     _agent-sandbox-validate-variant || return 1
 
-    # --upgrade 是純 build 操作、不碰 mount／identity（run/build 分家紅線），
-    # 驗證 identity 存在與否在這裡無意義，略過避免擋到不相干的建置流程
+    # --upgrade 是純 build 操作、不碰 mount／identity（run/build 分家紅線）：
+    # identity 落定（CLI／[identity] 段／預設三選一）與存在性驗證在這裡都無意義，
+    # 略過避免擋到不相干的建置流程；identity 在 --upgrade 模式下維持空字串，
+    # 反正後續 build-chain 不會讀它（B0049）
+    local identity_from_file=""
     if [[ -z "$upgrade" ]]; then
+        _agent-sandbox-apply-identity-config || return 1
         _agent-sandbox-validate-identity || return 1
     fi
 

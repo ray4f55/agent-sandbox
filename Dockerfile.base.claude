@@ -127,11 +127,13 @@ WORKDIR /workspace
 # 7. entrypoint：runtime UID 動態補 /etc/passwd／/etc/group 紀錄
 # =========================================================
 # ssh／git-over-ssh 呼叫 getpwuid() 查無使用者會直接拒絕執行（非優雅降級）。
-# 開放這兩個檔可寫（world-writable，非 OpenShift 的 GID 0 慣例 g=u——本專案
+# 開放這幾個檔可寫（world-writable，非 OpenShift 的 GID 0 慣例 g=u——本專案
 # GID 是 host 真實 GID，非固定 0，g=u 在這裡不生效）：容器 cap_drop: ALL +
 # no-new-privileges 已堵死唯一的理論提權路徑（SUID 二進位查表），不構成
 # 風險。see docs/design/agent-sandbox.md（B0044）
-RUN chmod 666 /etc/passwd /etc/group
+# /etc/ssh/ssh_config 一併開放：entrypoint.sh 執行時是非 root UID，需要能寫
+# 這個檔案才能動態修正 SSH 的 ~ 展開路徑。see docs/design/agent-sandbox.md（B0050）
+RUN chmod 666 /etc/passwd /etc/group /etc/ssh/ssh_config
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod a+rx /usr/local/bin/entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

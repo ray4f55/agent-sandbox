@@ -75,7 +75,8 @@ WORKDIR /workspace
 # =========================================================
 # 7. entrypoint：runtime UID 動態補 /etc/passwd／/etc/group 紀錄（同 base.claude）
 # =========================================================
-RUN chmod 666 /etc/passwd /etc/group
+# /etc/ssh/ssh_config 一併開放（B0050，同 base.claude 理由）
+RUN chmod 666 /etc/passwd /etc/group /etc/ssh/ssh_config
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod a+rx /usr/local/bin/entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
