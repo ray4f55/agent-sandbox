@@ -651,6 +651,24 @@ agent-sandbox --new-identity ops
 `--identity` 指到不存在的資料夾會直接報錯（不會靜默幫你建一個空的），支援
 Tab 補全。進容器後 shell prompt 會帶 `[<identity>]` 前綴，提醒目前是哪個身分。
 
+**逐專案預設身分（`.agent-sandbox` 的 `[identity]` 段）**
+
+某專案本質上就該用同一個身分（例如專門管雲端主機的 `ops` 專案），在該專案根
+的 `.agent-sandbox` 加 `[identity]` 段，之後在該專案打 `agent-sandbox` 不用
+再手動加 `--identity`：
+
+```ini
+# ~/repos/ai-ops/.agent-sandbox
+[identity]
+identity = ops
+```
+
+啟動時會印 `📄 讀取 …/.agent-sandbox（[identity] 段：identity=ops）`——身分
+切換影響風險層級（可能帶 SSH 金鑰），這條可見性訊息不能省。合成規則：單值
+覆蓋，`--identity` > 檔案 `identity` > 內建 `default`；跟 `[image]` 的
+`base` 同一套規則。`[identity]` 只有專案層（跟 `[image]` 一樣），這次想改用
+別的身分，CLI `--identity` 直接覆蓋即可。
+
 > 設計取捨（為何容器內路徑固定不隨身分變動、為何預設身分資料夾叫
 > `default`、`--new-identity` 為何不牴觸 `--identity` 的 fail-fast 紅線）見
 > [`docs/design/agent-sandbox.md`](docs/design/agent-sandbox.md)「多身分」與
