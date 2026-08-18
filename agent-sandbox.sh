@@ -554,14 +554,35 @@ _agent-sandbox-ensure-prereqs() {
     # 任何預期讀寫 JSON 的工具會直接壞掉。之前只有 init.sh 幫 default 身
     # 分補過這個檔案，其他身分完全沒人補；比照 .gitconfig 的做法，補到
     # 這個每次啟動都跑的安全網，涵蓋所有 identity。
+    # 內容須是 `{}`、不能是 touch 出來的 0 bytes：claude CLI 直接對內容
+    # 做 JSON.parse()，空檔案（連 `{}` 都不是）會被判定成「損毀設定檔」
+    # （`Unexpected EOF`），逼出一個「Reset with default configuration」
+    # 的互動選單——這正是本專案「run 永不互動」紅線要避免的情境（B0046
+    # 用 --new-identity 建全新身分、第一次真的把這個檔案交給 claude CLI
+    # 讀時發現，此前 default 身分的 .claude.json 幾乎都早有真實內容，
+    # 這條路徑一直沒被踩過）。
+    # 用 -s（存在且非空）而非 -e（只看存在）判斷：0 bytes 對 .claude.json
+    # 沒有「使用者刻意留空」這種合法語意（不像 .gitconfig 留空表示不帶
+    # 身分），純粹是壞檔案，該被視同缺檔重建——這樣舊版 touch 出來的
+    # 0-byte 殘留檔，下次重跑（含 --new-identity 的健檢用途）會自動修復。
     local claude_json="$target_home/.claude.json"
-    if [[ -e "$claude_json" ]]; then
+    if [[ -s "$claude_json" ]]; then
         (( verbose )) && printf '   %-13s 已存在，未變動\n' ".claude.json"
-    elif touch "$claude_json"; then
-        (( verbose )) && printf '   %-13s 🆕 已建立\n' ".claude.json"
     else
-        echo "❌ 無法建立 $claude_json" >&2
-        return 1
+        local claude_json_was_empty_stub=0
+        [[ -e "$claude_json" ]] && claude_json_was_empty_stub=1
+        if printf '{}' > "$claude_json"; then
+            if (( verbose )); then
+                if (( claude_json_was_empty_stub )); then
+                    printf '   %-13s 🔧 修復壞檔（原為 0 bytes，非合法 JSON）\n' ".claude.json"
+                else
+                    printf '   %-13s 🆕 已建立\n' ".claude.json"
+                fi
+            fi
+        else
+            echo "❌ 無法建立 $claude_json" >&2
+            return 1
+        fi
     fi
 
     _agent-sandbox-ensure-gitconfig "$target_identity" "$verbose"
