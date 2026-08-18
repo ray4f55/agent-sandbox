@@ -757,6 +757,111 @@ fail-fast、不自動建立；`--upgrade` 不做身分驗證；身分可視化�
 同日開始實作：`home/node/` 更名 `home/default/`、compose 多身分掛載、
 函式 `--identity` 旗標與驗證、Tab 補全、身分可視化 banner/PS1。）
 
+## 建立新身分（`--new-identity`，B0046）
+
+對應檔：`agent-sandbox.sh` 的 `_agent-sandbox-validate-new-identity-flags`
+/ `_agent-sandbox-create-identity` / 重構後接受參數的
+`_agent-sandbox-ensure-prereqs` / `_agent-sandbox-ensure-gitconfig`。
+
+### 動機
+
+`--identity` 的 fail-fast 紅線（見上節）要求身分頂層資料夾
+`home/<name>/` 必須先手動 `mkdir -p` 才能用——這個手動步驟本身沒有被
+自動化過，是刻意設計（防打錯字時默默落入未預期的空白身分）。但這也代表
+「建立一個全新身分」永遠要手動一行指令，2026-07-28 使用者提出：想要
+連這個 `mkdir` 都省掉，但不透過修改 `--identity` 本身的 fail-fast 行為，
+而是「透過一個獨立的指令或參數處理」。
+
+### 設計：獨立動作型旗標，比 `--upgrade` 分岔得更早
+
+`--new-identity <name>` 是跟 `--upgrade` 同一類「動作型、做完就結束、
+不進容器」的旗標，但分岔位置更早——`--upgrade` 還需要跑
+`_agent-sandbox-validate-variant` 才知道要 build 哪條 base/addon 鏈；
+`--new-identity` 完全不需要，身分與 image 變體是正交的兩件事（見上節
+「與既有機制的關係」）。主函式流程裡，`--new-identity` 在
+`_agent-sandbox-parse-args` 之後、`identity="${identity:-default}"`
+**落定之前**就整個分岔掉，不進入後續 identity/base/addon/mount/build
+主線：
+
+```zsh
+_agent-sandbox-validate-upgrade-flags || return 1
+_agent-sandbox-validate-new-identity-flags || return 1
+if [[ -n "$new_identity" ]]; then
+    _agent-sandbox-create-identity "$new_identity"
+    return $?
+fi
+identity="${identity:-default}"
+...（原本主線繼續）
+```
+
+**旗標白名單**（比照 `_agent-sandbox-validate-upgrade-flags` 同一套
+紀律）：`--new-identity` 不接受 `--identity`（語意衝突：到底要建新的
+還是選舊的）、`--upgrade`（兩者都是「做完就結束」，同時給沒有意義）、
+`--launch`、`-m`／`--mount`／`--no-config-mounts`、`--base`／`--addon`
+——一律 fail-fast 直接報錯，不靜默忽略，跟這個專案一貫「打錯字/給錯
+旗標不該默默發生」的立場一致。
+
+### 身分已存在時：照跑一次、當健檢，不拒絕
+
+**捨棄了跟 `--upgrade` 版號快照「已存在就拒絕覆蓋」對稱的做法**。重新
+檢視後發現這個類比不成立：`--upgrade` 擋覆蓋是因為真的會摧毀東西
+（舊版號 tag 被蓋掉、rollback 能力消失）；`--new-identity` 底層操作
+（`mkdir -p`／touch-if-missing／`.gitconfig` seed-if-missing）本質上就是
+「檢查缺什麼補什麼」，不管跑幾次都不會動到已存在的內容，選項 B（拒絕）
+擋的是不存在的風險，只是表面上長得像。`--identity` fail-fast 紅線真正
+要防的是「靜默」與「意外落入非預期狀態」——只要把每一步做了什麼明確
+印出來（見下節），選項 A（照跑）就沒有踩到那條紅線的精神，還多換到一個
+實用的副作用：身分裡某個子項如果因故被刪掉或壞掉（例如曾經真的發生過的
+`.claude.json` 被 podman 誤建成資料夾，見上節），重跑一次
+`--new-identity` 就能自動修復。
+
+### 逐項可見性：不管有沒有變動，六個子項都要明確列出
+
+使用者明確要求：「不管是已存在還是補了什麼，全都要顯示出來，不可以
+默默在背後做掉」。落地方式：`_agent-sandbox-ensure-prereqs` 與
+`_agent-sandbox-ensure-gitconfig` 重構成接受兩個參數
+（`target_identity`、`verbose`），對 `.claude`／`.codex`／
+`.config/mise`／`.ssh`／`.claude.json`／`.gitconfig` 六個子項逐一在
+動手前判斷存在與否、動手後依實際結果（成功才印「🆕 已建立」，不能
+無條件宣稱）分類回報：
+
+```
+🔍 檢查身分 home/ops/：
+   .claude       已存在，未變動
+   .codex        已存在，未變動
+   .config/mise  已存在，未變動
+   .ssh          🆕 已建立
+   .claude.json  已存在，未變動
+   .gitconfig    已存在，未變動
+✅ 身分 ops 已就緒。下一步：agent-sandbox --identity ops
+```
+
+**回報必須基於操作的真實結果，不能樂觀假設成功**：`mkdir -p`／`touch`／
+寫入 `.gitconfig` 都先判斷實際回傳值，失敗就印 `❌` 並 `return 1`，不會
+在操作失敗的情況下還印出「🆕 已建立」——印一個錯誤的成功訊息比什麼都
+不印更誤導，這正是使用者「不可默默做掉」要求的真正精神（見「行為設計」
+的完整討論脈絡於 backlog）。
+
+**範圍界定：只有 `--new-identity` 走逐項回報，日常啟動維持安靜**。
+`ensure-prereqs`／`ensure-gitconfig` 是共用同一份邏輯（`verbose` 參數
+控制輸出多寡），但日常啟動路徑（`agent-sandbox --identity <name>`）
+呼叫時明確傳 `verbose=0`——那條路徑的既有紅線是「零互動、秒起」，99%
+情況下這個檢查完全無事可做，若也逐項印 6 行會變成每次日常啟動都多出
+雜訊，跟現有「只有真的有東西要秀才印」的安靜風格（額外掛載清單、
+`[image]` 段讀取摘要都是這樣）不一致。**若日後想把逐項回報也套用到
+日常啟動路徑，需要另外評估、明確拍板，不是本項自動涵蓋的範圍**。
+
+→ **紅線**：`--new-identity` 一律 fail-fast 對待不相干旗標；
+`ensure-prereqs`／`ensure-gitconfig` 的 verbose 輸出必須基於操作真實
+成功與否，不能樂觀假設；日常啟動路徑的安靜行為不受本項影響，除非另有
+明確決策。
+
+（原追蹤於 B0046，2026-07-28 從 intake「多身份 home 目錄不用手動 mkdir」
+分析出發，查證後發現 `.ssh` 等子目錄早已由既有 `ensure-prereqs` 自動
+補齊、真正缺的只有頂層資料夾這層，據此設計獨立指令，不牴觸
+`--identity` 本身的 fail-fast 紅線；同日拍板命名、行為與可見性細節、
+落地實作。）
+
 ## Tab 補全（`_agent-sandbox` + `compdef`）
 
 **用 `_arguments` 宣告式狀態機**（非 `case $words[CURRENT-1]` 的弱位置感）：

@@ -149,6 +149,7 @@ source /path/to/agent-sandbox/agent-sandbox.sh
 > - `agent-sandbox v1.0.0` —— 跑某個版號快照（rollback 用）
 > - `agent-sandbox --addon openspec` —— 疊加 add-on（見下方「進階：Add-on 變體」）
 > - `agent-sandbox --identity ops` —— 切換身分資料來源（見下方「多身分」）
+> - `agent-sandbox --new-identity ops` —— 建立新身分骨架（見下方「多身分」）
 >
 > 它是 **zsh** 函式（用到 zsh 限定語法）；從 bash source 會提示需要 zsh。
 > 設計取捨見 [`docs/design/agent-sandbox.md`](docs/design/agent-sandbox.md)。
@@ -621,15 +622,21 @@ agent-sandbox                    # 不帶旗標＝ --identity default（一般�
 區隔。新增身分：
 
 ```bash
-mkdir -p home/ops/.claude home/ops/.codex home/ops/.config/mise home/ops/.ssh
+agent-sandbox --new-identity ops
 ```
+
+純建立動作，不進容器；逐項列出每個子項是「已存在」還是「新建/補上」，不會
+默默做掉任何一步。身分已存在時重跑也安全，天生冪等（不覆蓋既有內容），可以
+當健檢用——例如某個子目錄不小心被刪掉，重跑一次就補回來。建完照常
+`agent-sandbox --identity ops` 啟動。
 
 `--identity` 指到不存在的資料夾會直接報錯（不會靜默幫你建一個空的），支援
 Tab 補全。進容器後 shell prompt 會帶 `[<identity>]` 前綴，提醒目前是哪個身分。
 
 > 設計取捨（為何容器內路徑固定不隨身分變動、為何預設身分資料夾叫
-> `default`）見 [`docs/design/agent-sandbox.md`](docs/design/agent-sandbox.md)
-> 「多身分」段。本機已有舊版單一身分資料夾 `home/node/`？見
+> `default`、`--new-identity` 為何不牴觸 `--identity` 的 fail-fast 紅線）見
+> [`docs/design/agent-sandbox.md`](docs/design/agent-sandbox.md)「多身分」與
+> 「建立新身分」段。本機已有舊版單一身分資料夾 `home/node/`？見
 > [`docs/guides/migrate-home-node-to-default.md`](docs/guides/migrate-home-node-to-default.md)。
 
 ---
