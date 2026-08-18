@@ -854,7 +854,7 @@ agent-sandbox() {
     local compose_dir="$_AGENT_SANDBOX_DIR"
 
     # 設定檔健檢（段落放錯層 / 已移除段）。同檔（從工具目錄自身啟動）只當專案檢，
-    # 因為那份檔同時是專案檔、[image] 在它裡面是合法的。
+    # 因為那份檔同時是專案檔、[image]/[identity] 在它裡面是合法的。
     local _gf="$compose_dir/.agent-sandbox" _pf="$PWD/.agent-sandbox"
     if [[ "$_pf" == "$_gf" ]]; then
         _agent-sandbox-lint-config "$_pf" project

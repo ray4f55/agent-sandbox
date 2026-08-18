@@ -1,7 +1,11 @@
 #!/bin/sh
-# 容器啟動時的第一個進程：runtime UID 沒有對應的 /etc/passwd 紀錄
-# （「幽靈使用者」），ssh／git-over-ssh 會因查無使用者直接拒絕執行。
-# 動態補一筆紀錄後 exec 交還原本要跑的指令。see docs/design/agent-sandbox.md（B0044）
+# 容器啟動時的第一個進程，做兩件跟 SSH 相關的修正後 exec 交還原本要跑的指令：
+# 1. runtime UID 沒有對應的 /etc/passwd 紀錄（「幽靈使用者」），ssh／
+#    git-over-ssh 會因查無使用者直接拒絕執行。動態補一筆紀錄。
+#    see docs/design/agent-sandbox.md（B0044）
+# 2. 即使有紀錄，pw_dir 欄位可能被 podman 搶先補錯（見上方 B0044「已知
+#    環境相依限制」），導致 ssh 的 ~ 展開找錯 .ssh 位置。系統層級
+#    ssh_config 動態掃描身分 .ssh/ 修正。see docs/design/agent-sandbox.md（B0050）
 set -e
 
 AGENT_SANDBOX_USER="${AGENT_SANDBOX_USER:-agent}"

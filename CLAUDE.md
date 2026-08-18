@@ -45,11 +45,20 @@
   build 或互動提示**；版號快照不可覆蓋
 - 退出清孤兒 network 不清 volume → **預設保留 volume 資料**
 - `.agent-sandbox` 設定檔：全面 `key = value`（`[mount]` 用 `path =`）；`[mount]`
-  全域（工具目錄）+ 專案 + CLI **累加**、`[image]` 專案 only。全域 mount 開放是
-  B0033 解除 B0024 紅線（配套：來源標示 + `inherit-global`/`--no-config-mounts`）
-  → **改 mount 解析要保留來源可見性與逃生口**
+  全域（工具目錄）+ 專案 + CLI **累加**、`[image]`/`[identity]` 專案 only。全域
+  mount 開放是 B0033 解除 B0024 紅線（配套：來源標示 + `inherit-global`/
+  `--no-config-mounts`）→ **改 mount 解析要保留來源可見性與逃生口**
+- `[identity]` 段（B0049）：identity 落定邏輯留在
+  `_agent-sandbox-apply-identity-config` 內（仿 `base`，不在主函式提早寫死
+  `default`）→ **`--upgrade`/`--new-identity` 的旗標白名單檢查必須早於這個
+  函式呼叫，否則專案帶 `[identity]` 段時會誤判成『有給 --identity』**
 - 容器 git 身分 = `home/<identity>/.gitconfig` 標準 git 檔（缺檔才從 host seed、
   `-e` 判存在、之後不碰）→ **不要改回每次重寫，也不要重新引入 `[git]` identity 段**
+- 容器內裸 `ssh` 找 `~/.ssh` 走系統層級 `/etc/ssh/ssh_config`（entrypoint.sh
+  動態掃描身分 `.ssh/` 產生 `IdentityFile` + `Include` 使用者 config，兩份
+  `Dockerfile.base.*` 開放 `chmod 666 /etc/ssh/ssh_config`）修正 pw_dir 錯誤時
+  的 `~` 展開（B0050）→ **不要改回動 `/etc/passwd` 的 `pw_dir`**（該路已評估
+  過風險更高，見 B0044/B0050 設計檔）
 
 @docs/design/agent-sandbox.md
 

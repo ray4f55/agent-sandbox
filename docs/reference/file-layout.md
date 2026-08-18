@@ -18,7 +18,7 @@ Repo 內每個檔案／資料夾的角色、是否進版控、主要讀寫者。
 | `docker-compose.yaml` | 服務／volume／資源限制 | ✅ |
 | `.dockerignore` | build context 排除清單 | ✅ |
 | `.gitignore` | 版控排除清單 | ✅ |
-| `.agent-sandbox`（選用） | **全域**設定檔（工具目錄）：全域 `[mount]`（每個 sandbox 都掛的共用路徑）；逐開發者本機狀態。專案層同名檔放各專案根（`[mount]`/`[image]`） | ❌（gitignored） |
+| `.agent-sandbox`（選用） | **全域**設定檔（工具目錄）：全域 `[mount]`（每個 sandbox 都掛的共用路徑）；逐開發者本機狀態。專案層同名檔放各專案根（`[mount]`/`[image]`/`[identity]`，後兩者僅專案層生效） | ❌（gitignored） |
 
 ## docs/
 
