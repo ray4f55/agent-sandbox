@@ -862,6 +862,55 @@ identity="${identity:-default}"
 `--identity` 本身的 fail-fast 紅線；同日拍板命名、行為與可見性細節、
 落地實作。）
 
+## gcloud addon + 身分掛載清單擴充（B0047）
+
+對應檔：`Dockerfile.addon.gcloud`、`docker-compose.yaml` 的
+`.config/gcloud` 掛載、`agent-sandbox.sh` 的 `_agent-sandbox-ensure-prereqs`
+子目錄清單。
+
+### 動機
+
+`--identity ops` 這類雲端主機維運身分，除了 SSH 金鑰還會用到 `gcloud`
+CLI 連 GCP。`gcloud` 跟身分是正交的兩件事（見「與既有機制的關係」），
+所以走既有 `--base`/`--addon` 機制新增一個 addon，不是身分機制的一部分
+——這點跟 B0046 的判斷（`--new-identity` 不碰 `--base`/`--addon`）同一
+個道理。
+
+### 安裝方式：官方 apt repo，不走 mise
+
+`Dockerfile.addon.gcloud` 用 Google 官方文件記載的 Debian/Ubuntu apt repo
+安裝法（`packages.cloud.google.com/apt` + `gpg --dearmor` 到
+`/usr/share/keyrings/`，取代已棄用的 `apt-key add`）。**不走 mise**：
+mise 生態圈沒有穩定通用的 gcloud plugin，而 gcloud 本身不是「語言環境」
+（`docs/design/mise.md`「image 不預裝任何語言」那條紅線管的是 Python／
+Go 這類語言 runtime，gcloud 是獨立 CLI 工具，跟 codex/openspec 走
+apt/npm 官方管道是同一類）。裝「當下最新」（保鮮哲學同 claude/codex/
+openspec），版本固化進 `/etc/gcloud-version`，跟其他工具的版本記錄機制
+對齊。
+
+### 登入態持久化：身分掛載清單擴充成七項
+
+`gcloud auth login` 的 OAuth token／application-default credentials
+存在 `$HOME/.config/gcloud/`。跟 `.claude`／`.codex` 同一套「拋棄式容器、
+登入態不拋棄」待遇——`docker-compose.yaml` 新增
+`home/<identity>/.config/gcloud` 掛載，`_agent-sandbox-ensure-prereqs`
+的子目錄清單從六項（`.claude`／`.codex`／`.config/mise`／`.ssh`／
+`.claude.json`／`.gitconfig`）擴充成七項（加 `.config/gcloud`）。
+
+**對沒裝 `gcloud` addon 的身分／base 無害**：跟 `.codex` 全掛的邏輯一樣
+（B0016 方案 A）——沒裝 gcloud 的容器裡這就是一個空資料夾，不影響任何
+東西；換掉的代價只是身分資料夾多一個子目錄，跟現有六項一起靠
+`ensure-prereqs` 冪等維護，機制上零額外成本。
+
+→ **紅線**：新增任何會被身分掛載、需要持久化登入態的工具時，走同一套
+「加進 `docker-compose.yaml` 掛載清單 + `ensure-prereqs` 子目錄清單」
+模式，不要為單一工具另開特例機制。
+
+（原追蹤於 B0047，2026-08-18 使用者提出 `ops` 身分要管理雲端主機的
+實際需求，當場拍板走 addon 機制 + 持久化登入態；gcloud 實際登入流程
+（OAuth device code vs service account）留待建完 addon、實測連線時再
+細談，不在本項範圍內先假設。）
+
 ## Tab 補全（`_agent-sandbox` + `compdef`）
 
 **用 `_arguments` 宣告式狀態機**（非 `case $words[CURRENT-1]` 的弱位置感）：
@@ -975,6 +1024,8 @@ run 不起來。→ **改補全的 tag 來源時保持「補得到＝跑得起�
 - `agent-sandbox-claude-openspec:latest` —— `--base claude --addon openspec`
 - `agent-sandbox-codex:latest` —— `--base codex`（B0016 起內建第二 base）
 - `agent-sandbox-codex-openspec:latest` —— `--base codex --addon openspec`
+- `agent-sandbox-claude-gcloud:latest` —— `--base claude --addon gcloud`
+  （B0047，官方 Google Cloud CLI，供雲端主機維運身分使用）
 
 ### 逐專案預設 base/addon（專案 `.agent-sandbox` 的 `[image]` 段）
 

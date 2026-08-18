@@ -1,0 +1,40 @@
+# =========================================================
+# Google Cloud CLI add-on（base-agnostic）
+# =========================================================
+# 官方 gcloud CLI，供 --identity ops 這類雲端主機維運身分使用（SSH 之外
+# 另一種遠端管理管道）。安裝方式為官方文件記載的 Debian/Ubuntu apt repo
+# 法：https://cloud.google.com/sdk/docs/install#deb
+#
+# 疊在任何 base image 上：開頭 `ARG BASE_IMAGE` + `FROM ${BASE_IMAGE}`，
+# 由 agent-sandbox 函式自動帶上 BASE_IMAGE / target tag。
+# 手動 build 範例：
+#   podman build -f Dockerfile.addon.gcloud \
+#       --build-arg BASE_IMAGE=agent-sandbox-claude:latest \
+#       -t agent-sandbox-claude-gcloud:latest .
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+# curl／ca-certificates 兩個 base 都已裝；這裡只需額外補 apt repo 簽章
+# 驗證要用的 gnupg。用 gpg --dearmor 到 /usr/share/keyrings/（官方目前
+# 建議做法），取代已棄用的 apt-key add。
+# 裝「當下最新」（保鮮哲學同 claude/codex/openspec），版本固化進
+# /etc/gcloud-version 可追溯，跟其他工具的版本記錄機制對齊。
+RUN apt-get update && apt-get install -y gnupg \
+    && curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+        | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
+        > /etc/apt/sources.list.d/google-cloud-sdk.list \
+    && apt-get update && apt-get install -y google-cloud-cli \
+    && rm -rf /var/lib/apt/lists/* \
+    && gcloud --version | head -1 > /etc/gcloud-version \
+    && echo "build date: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /etc/gcloud-version
+
+# 靜態 LABEL：指路牌，真實版本以 /etc/gcloud-version 為準（classic
+# builder 不支援動態 LABEL 內容，同 openspec addon 慣例）
+LABEL gcloud.version-file="/etc/gcloud-version"
+
+# 登入態持久化見 docker-compose.yaml 的 .config/gcloud 掛載（B0047）：
+# gcloud 把 OAuth token／application-default credentials 存在
+# $HOME/.config/gcloud/，跟 claude/codex 的憑證掛載走同一套「拋棄式容器、
+# 登入態不拋棄」待遇，不需要每個 session 重新登入。

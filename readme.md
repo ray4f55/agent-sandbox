@@ -55,6 +55,7 @@ agent-sandbox/
 ├── Dockerfile.base.claude            # base image：Claude Code（預設）
 ├── Dockerfile.base.codex             # base image：OpenAI Codex
 ├── Dockerfile.addon.openspec         # add-on 層：OpenSpec（可疊在任一 base 上）
+├── Dockerfile.addon.gcloud           # add-on 層：Google Cloud CLI（可疊在任一 base 上）
 ├── README.md                         # 你正在讀的這份（怎麼用）
 ├── CLAUDE.md                         # AI 代理讀的設計紅線索引（@import docs/design）
 ├── CONTRIBUTING.md · CODE_OF_CONDUCT.md · LICENSE（MIT）
@@ -375,6 +376,23 @@ cat /etc/codex-cli-version    # 查 build 當下凍結的 codex 版本
 | Add-on | Dockerfile | 用途 |
 |---|---|---|
 | `openspec` | [`Dockerfile.addon.openspec`](Dockerfile.addon.openspec) | [OpenSpec](https://github.com/Fission-AI/OpenSpec) spec-driven 開發框架 |
+| `gcloud` | [`Dockerfile.addon.gcloud`](Dockerfile.addon.gcloud) | 官方 Google Cloud CLI，供雲端主機維運身分使用（見下方「多身分」段的 `ops` 情境） |
+
+**用 gcloud**
+
+```bash
+agent-sandbox --upgrade --addon gcloud    # 首次：建含 gcloud 的鏈
+agent-sandbox --identity ops --addon gcloud
+
+# 容器內：
+gcloud --version
+cat /etc/gcloud-version
+```
+
+登入態（`gcloud auth login` 的 OAuth token／application-default
+credentials）持久化在 `home/<identity>/.config/gcloud`，跟 `.claude`／
+`.codex` 同一套「拋棄式容器、登入態不拋棄」待遇——登入一次，之後每個
+session 都還在，不用重新登入。
 
 **用 OpenSpec**
 

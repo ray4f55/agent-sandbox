@@ -85,6 +85,10 @@ jobs:
             addon: openspec
           - base: codex
             addon: openspec
+          - base: claude
+            addon: gcloud
+          - base: codex
+            addon: gcloud
     steps:
       - uses: actions/checkout@v4
 
