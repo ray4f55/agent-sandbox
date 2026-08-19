@@ -13,9 +13,11 @@ ARG AGENT_HOME=/home/agent-sandbox
 ARG AGENT_TOOLS=/opt/agent-tools
 
 # 1. 安裝 Linux 常見的基礎開發工具
+# bash-completion：光裝套件不夠，還要在下方 bashrc 明確 source 才會生效
+# （非登入 shell 不讀 /etc/profile.d/，見下方對應 RUN 註解，B0052）
 RUN apt-get update && apt-get install -y \
     git curl ca-certificates jq less bash libicu-dev \
-    postgresql-client \
+    postgresql-client bash-completion \
     && rm -rf /var/lib/apt/lists/*
 
 
@@ -43,6 +45,11 @@ ENV PATH="${AGENT_TOOLS}/mise-data/shims:$PATH"
 # 先於 chmod，否則 volume 首次掛載會繼承到 root-only 預設權限、mise 寫
 # 不進去）。see docs/design/agent-sandbox.md（B0043 mise 搬遷）
 RUN mkdir -p "$MISE_DATA_DIR" && chmod 777 "$MISE_DATA_DIR"
+
+# 啟用 bash-completion（ssh 等指令的 tab 補全，B0052）：套件裝完只提供
+# /etc/profile.d/bash_completion.sh，但 compose run 走的是非登入 shell、
+# 不會經過 /etc/profile，必須在這裡明確 source 引擎本體才會生效。
+RUN echo 'if [ -f /usr/share/bash-completion/bash_completion ]; then . /usr/share/bash-completion/bash_completion; fi' >> /etc/bash.bashrc
 
 # 確保 bash 互動模式自動啟用 mise (cd 到專案後讀其 mise.toml)
 RUN echo 'eval "$(mise activate bash)"' >> /etc/bash.bashrc
