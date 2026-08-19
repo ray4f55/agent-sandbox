@@ -380,6 +380,24 @@ _agent-sandbox-validate-identity() {
     fi
 }
 
+# --- 淨化字串成合法的 podman/compose 命名片段 ---
+# 參數：$1=原始字串；stdout 淨化後結果。
+# 小寫化＋非法字元換 `-`；podman/compose 命名規則要求開頭是英數字
+# （`[a-zA-Z0-9][a-zA-Z0-9_.-]*`），額外去掉淨化後殘留在開頭的 `-`／`_`
+#（例：`.ssh` 先變 `-ssh` 再去頭變 `ssh`）。結果為空（原字串整個是特殊
+# 字元組成，如 `...`）→ 落 `workspace` 預設值，避免組出不合法名稱。
+# `proj_basename`／`proj_name` 共用同一份，避免各自 inline 一份、只改
+# 一處忘了另一處。see docs/design/agent-sandbox.md（B0051）
+_agent-sandbox-sanitize-name() {
+    local s
+    s="$(printf '%s' "$1" \
+         | tr '[:upper:]' '[:lower:]' \
+         | sed 's/[^a-z0-9_-]/-/g' \
+         | sed 's/^[-_]*//')"
+    [[ -z "$s" ]] && s="workspace"
+    printf '%s' "$s"
+}
+
 # --- 額外掛載：全域 + 專案 .agent-sandbox 的 [mount] 段 + CLI -m → podman -v ---
 # 讀：cli_mounts no_config_mounts proj_basename compose_dir／寫：vol_args mount_display
 # 三來源累加（全域 → 專案 → CLI）；全域路徑須絕對/~（相對在全域沒有基準）；專案可
@@ -882,12 +900,11 @@ agent-sandbox() {
 
     local proj_basename proj_name container_name
     # 淨化過的當前目錄 basename，給 mount target 與 container_name 共用
-    proj_basename="$(basename "$PWD" \
-                 | tr '[:upper:]' '[:lower:]' \
-                 | sed 's/[^a-z0-9_-]/-/g')"
-    proj_name="$(basename "$compose_dir" \
-                 | tr '[:upper:]' '[:lower:]' \
-                 | sed 's/[^a-z0-9_-]/-/g')-$(date +%Y%m%d)"
+    # （B0051：淨化邏輯收斂進 _agent-sandbox-sanitize-name，隱藏資料夾
+    # 如 .ssh 淨化後開頭是 - 會讓 container 命名不合法，不能只做小寫化
+    # +換字元這兩步）
+    proj_basename="$(_agent-sandbox-sanitize-name "$(basename "$PWD")")"
+    proj_name="$(_agent-sandbox-sanitize-name "$(basename "$compose_dir")")-$(date +%Y%m%d)"
     container_name="${proj_basename}-$(date +%H%M%S)-$$"
 
     # --upgrade 不碰 mount／identity（run/build 分家紅線）：collect-mounts 會讀
