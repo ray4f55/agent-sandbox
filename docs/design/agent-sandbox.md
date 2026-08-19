@@ -23,12 +23,25 @@ alias 只能塞一行，**無法在 `podman compose run --rm` 結束後接續執
 | `proj_name` | `<compose 目錄 basename>-<YYYYMMDD>`，**淨化** | `COMPOSE_PROJECT_NAME`：按日隔離 + cleanup label 匹配 |
 | `container_name` | `<proj_basename>-<HHMMSS>-<PID>` | 同日同專案多 session 不撞名；`--rm` 後立即釋放此名 |
 
-**淨化規則**：`tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g'`
-（compose project name 規範只收 `[a-z0-9_-]`）。
+**淨化規則**：共用 helper `_agent-sandbox-sanitize-name`——小寫化 +
+`sed 's/[^a-z0-9_-]/-/g'`（compose project name 規範只收
+`[a-z0-9_-]`），**再去掉淨化後殘留在開頭的 `-`／`_`**，結果為空則落
+`workspace` 預設值。去頭這步是 B0051 補的：podman/docker 的 container
+命名規則要求**開頭必須是英數字**（`[a-zA-Z0-9][a-zA-Z0-9_.-]*`），
+若 `$PWD` 是隱藏資料夾（如 `.ssh`）或底線開頭資料夾（如 `_backlog`），
+淨化後開頭會是 `-`／`_`，組出的 `container_name` 不合法、`run` 直接
+被 daemon 拒絕。
+
+→ **紅線**：`proj_basename`／`proj_name` 都必須呼叫這個共用 helper，
+不要各自 inline 一份淨化 pipeline——B0051 的成因正是兩處各自複製了
+同一段邏輯，只有其中一處後來被修過，另一處帶著舊漏洞繼續存在。
 
 **為什麼 `proj_name` 帶日期戳**：見 docker-compose.md 的
 `COMPOSE_PROJECT_NAME` 章節（network/container 按日隔離 + cleanup label
 精準匹配 + 歷史除錯）。
+
+（原追蹤於 B0051，2026-08-19 使用者 `cd` 進 `.ssh` 資料夾當 cwd 啟動時
+發現、確認根因、落地並實機驗證。）
 
 ## Tag 控制與升級（run/build 分家）
 
