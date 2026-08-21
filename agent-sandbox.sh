@@ -744,6 +744,7 @@ _agent-sandbox-build-chain() {
         fi
     done
     echo "🔄 升級重建（--no-cache）：${(j:、:)chain_repos}"
+    echo "   （鏈由目前目錄解析：CLI > .agent-sandbox [image] 段 > 預設 claude；換目錄執行可能建到不同鏈）"
     echo "   完成後打 tag：:latest + :${new_ver}${ver_note}"
 
     # 2) 刷新 base 的 FROM image（如 node:22-slim；--no-cache 不會自動拉新底）

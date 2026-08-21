@@ -297,6 +297,7 @@ $ agent-sandbox
 
 $ agent-sandbox --upgrade
 🔄 升級重建（--no-cache）：agent-sandbox-claude
+   （鏈由目前目錄解析：CLI > .agent-sandbox [image] 段 > 預設 claude；換目錄執行可能建到不同鏈）
    完成後打 tag：:latest + :v1.0.0（自動配號，首版）
 ⬇️  刷新 base image：node:22-slim
 🔧 build agent-sandbox-claude:latest …
@@ -311,6 +312,7 @@ Claude 出新版想升級：
 ```
 $ agent-sandbox --upgrade
 🔄 升級重建（--no-cache）：agent-sandbox-claude
+   （鏈由目前目錄解析：CLI > .agent-sandbox [image] 段 > 預設 claude；換目錄執行可能建到不同鏈）
    完成後打 tag：:latest + :v1.1.0（自動配號，前一版 v1.0.0）
 …
 ```

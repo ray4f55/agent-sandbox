@@ -90,6 +90,23 @@ Design intents：
 7. **避免 registry 雜訊**：run 在「image 已在」狀態下執行，
    `pull_policy: missing` 既不 build 也不 pull、靜默（此紅線不變，
    見 docker-compose.md）。
+8. **`--upgrade` 建的鏈與 `run` 找的鏈共用同一套變體解析（CLI > 專案
+   `.agent-sandbox` `[image]` 段 > 內建 `claude`），刻意耦合、不是
+   疏漏**：`--upgrade` 表面上感覺像全域維護操作，實際上跟 `run` 走
+   同一段 `_agent-sandbox-apply-image-config`（`agent-sandbox.sh:886`
+   無條件呼叫，不受 `--upgrade` 與否影響），所以會吃 cwd 當下專案的
+   `[image]` 段——換目錄執行 `--upgrade` 可能建到不同鏈。**不能拆開這個
+   耦合**：若 `--upgrade` 忽略專案 `[image]` 段、只建預設 `claude`，
+   帶 `[image] addon = openspec` 的專案會出現「剛升級完，`run` 解析
+   出 `claude-openspec` 鏈卻找不到 image」的更糟情境——`--upgrade`
+   必須建出跟 `run` 會找的**同一條**鏈，兩者不能各自解析。與此相對，
+   `[identity]` 段刻意被排除在 `--upgrade` 外（見「逐專案預設身分」
+   章節）——因為 identity 是純 runtime 概念、跟 build 完全無關，
+   base/addon 則是 build 的對象本身，兩者不對稱是必然，不是不一致。
+   認知負擔的緩解走**可見性**，不走拆耦合：`_agent-sandbox-build-chain`
+   的 `🔄 升級重建` 訊息固定附一行解析依據提醒（不分是否來自 CLI／
+   檔案／預設都印），讓「這個結果因目錄而異」在畫面上可見（原追蹤於
+   B0057，2026-08-21）。
 
 ### 版號：semver 自動配號 + 可指定
 
