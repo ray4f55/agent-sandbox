@@ -27,6 +27,7 @@
 # path = ../backend                      # 掛到 /workspace/backend
 # path = ../some/long/path/backend:api   # 指定別名，掛到 /workspace/api
 # path = ../shared:shared:ro             # 唯讀共用
+# path = ../shared::ro                   # 唯讀、不改名（中間空著＝容器路徑用預設 /workspace/shared）
 # path = ~/data/dump:/data/dump:ro       # 掛到 /workspace 以外（會印 ⚠️ 警告，自負其責）
 
 [image]  # 僅專案層生效（放全域檔會被 ⚠️ 略過）
