@@ -17,7 +17,7 @@ ARG AGENT_TOOLS=/opt/agent-tools
 # （非登入 shell 不讀 /etc/profile.d/，見下方對應 RUN 註解，B0052）
 RUN apt-get update && apt-get install -y \
     git curl ca-certificates jq less bash libicu-dev \
-    postgresql-client bash-completion rsync \
+    postgresql-client bash-completion rsync vim \
     && rm -rf /var/lib/apt/lists/*
 
 
