@@ -1048,6 +1048,71 @@ openspec），版本固化進 `/etc/gcloud-version`，跟其他工具的版本�
 （OAuth device code vs service account）留待建完 addon、實測連線時再
 細談，不在本項範圍內先假設。）
 
+## Office 文件處理 addon + base 的通用文件能力（B0058）
+
+對應檔：`Dockerfile.addon.office`、兩個 `Dockerfile.base.*` 的第一段 apt
+清單、`.github/workflows/build-images.yml` 的 addon matrix。
+
+### 動機與前提：容器內沒有 sudo，是紅線不是漏配
+
+需求是「agent 要能讀使用者的文件」，實務上撞到的是舊版 Office
+（`.doc`／`.xls`／`.ppt`）跟掃描件。工具鏈建議往往長成一行
+`sudo apt-get install …`——**這在本專案的容器內永遠不會成功，也不該想辦法
+讓它成功**：`cap_drop: [ALL]` + `no-new-privileges:true` + 非 root UID 是
+`docs/design/docker-compose.md`「資源／安全限制」的既有紅線。裝系統套件的
+唯一正規路徑是寫進 Dockerfile → `agent-sandbox --upgrade` 重建。
+
+### 分層依據：格式無關的通用能力 vs Office 專用（不是單純按體積切）
+
+| 落點 | 套件 | 粗估 |
+|---|---|---|
+| **兩個 base** | `poppler-utils`、`unar` | ~8 MB |
+| **`office` addon** | `libreoffice-{writer,calc,impress,draw}`、`fonts-noto-cjk`、`fonts-arphic-uming`、`antiword`、`catdoc`、`tesseract-ocr`、`tesseract-ocr-chi-tra` | ~1 GB+ |
+
+`pdftotext`／`unar` 是**跟文件格式無關的基礎能力**（幾乎每個專案遲早都會
+用到、加起來 8 MB），跟 B0056 加 `rsync`、後續加 `vim` 是同一個判斷等級 ——
+進 base。LibreOffice 那一整組是**Office 文件處理專用**且 1 GB+，全塞進 base
+會讓每個 session／每個身分都揹著，並在每次 `--upgrade`（`--no-cache` 整鏈
+重建）與 CI 重複付費 —— 這正是 addon 機制存在的理由。
+
+**`antiword`／`catdoc` 雖然只有 1 MB 也歸 addon**：它們是舊 Office 專用，
+且**對繁中常亂碼**（antiword 為西文設計、catdoc 的編碼參數也不完美）。放進
+base 會給人「base 就能讀 `.doc`」的錯覺，實際踩到亂碼；繁中舊 Office 可靠
+的路是 LibreOffice headless `--convert-to`，跟它綁同一層才誠實。它們在
+addon 內的定位是「不想啟動 LibreOffice 時的快速抽文字路徑」。
+
+### 幾個刻意的選擇
+
+- **走 addon 機制、不走 mise**：同 B0047（gcloud）的判斷——`docs/design/mise.md`
+  「不預裝任何語言」管的是語言 runtime，LibreOffice／tesseract 是獨立 CLI
+  工具，mise 生態圈也沒有穩定 plugin。
+- **CJK 字型是必要配套、不是選配**：缺了 `fonts-noto-cjk`，LibreOffice 轉
+  PDF／圖片時中文會變成豆腐方塊。要瘦身時不要先砍這個。
+- **刻意不加 `--no-install-recommends`**：Recommends 裡可能含轉檔 filter／
+  字型，砍掉的風險是某些格式轉出來壞掉。本項出發點是「急著要能讀」，先求
+  可用；瘦身（約可省 200 MB 的 JRE）留待日後真的嫌大再單獨評估——同
+  `ci-ghcr.md`「之後真的變成瓶頸再降規格，不預先優化」的立場。
+- **版本記錄用 `dpkg-query` 而非 `soffice --version`**：後者要在 build 期
+  啟動一次 headless LibreOffice（CI 的 QEMU 跨架構模擬下特別慢、多一個
+  失敗點），查套件版本本來就是 dpkg 的工作，`/etc/office-tools-version`
+  一樣可追溯，與 openspec／gcloud 的版本記錄慣例對齊。
+- **CI matrix 兩筆是本項最主要的持續成本**：`claude×office`、`codex×office`
+  都是 1 GB+ 的雙架構 QEMU build。日後嫌慢先降這兩筆的規格（例如只留
+  amd64），不要動其他既有變體。
+
+### 使用面：`-env:UserInstallation` 不是裝飾
+
+LibreOffice headless 併發轉檔會搶同一份 user profile 而互相卡住，每個呼叫
+要各自給獨立路徑（`-env:UserInstallation=file:///tmp/lo_$$`）。`$HOME`
+（`$AGENT_HOME`，world-writable）可寫，profile 本身不是問題。用法範例見
+README「用 office」段。
+
+→ **紅線**：新增文件處理工具時照這條分界線落層——**格式無關的通用能力**才
+進 base，**特定文件格式專用**（尤其體積大的）一律進 addon；新增 addon 記得
+同步 CI 的顯式 matrix（本機靠 glob 自動發現，CI 不會）。
+
+（原追蹤於 B0058，2026-08-30。）
+
 ## Tab 補全（`_agent-sandbox` + `compdef`）
 
 **用 `_arguments` 宣告式狀態機**（非 `case $words[CURRENT-1]` 的弱位置感）：
@@ -1163,6 +1228,8 @@ run 不起來。→ **改補全的 tag 來源時保持「補得到＝跑得起�
 - `agent-sandbox-codex-openspec:latest` —— `--base codex --addon openspec`
 - `agent-sandbox-claude-gcloud:latest` —— `--base claude --addon gcloud`
   （B0047，官方 Google Cloud CLI，供雲端主機維運身分使用）
+- `agent-sandbox-claude-office:latest` —— `--base claude --addon office`
+  （B0058，LibreOffice＋CJK 字型＋OCR，讓 agent 讀得懂舊版 Office／掃描件）
 
 ### 逐專案預設 base/addon（專案 `.agent-sandbox` 的 `[image]` 段）
 

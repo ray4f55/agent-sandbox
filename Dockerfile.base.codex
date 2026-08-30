@@ -11,9 +11,12 @@ ARG AGENT_TOOLS=/opt/agent-tools
 # 1. 安裝 Linux 常見的基礎開發工具（與 base.claude 同組，維持各 base 容器體驗一致）
 # bash-completion：光裝套件不夠，還要在下方 bashrc 明確 source 才會生效
 # （非登入 shell 不讀 /etc/profile.d/，見下方對應 RUN 註解，B0052）
+# poppler-utils／unar：格式無關的通用文件能力（PDF 抽文字/轉圖、解壓縮）；
+# 舊版 Office 與 OCR 走 --addon office，不進 base (see docs/design/agent-sandbox.md B0058)
 RUN apt-get update && apt-get install -y \
     git curl ca-certificates jq less bash libicu-dev \
     postgresql-client bash-completion rsync vim \
+    poppler-utils unar \
     && rm -rf /var/lib/apt/lists/*
 
 
