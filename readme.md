@@ -56,6 +56,7 @@ agent-sandbox/
 ├── Dockerfile.base.codex             # base image：OpenAI Codex
 ├── Dockerfile.addon.openspec         # add-on 層：OpenSpec（可疊在任一 base 上）
 ├── Dockerfile.addon.gcloud           # add-on 層：Google Cloud CLI（可疊在任一 base 上）
+├── Dockerfile.addon.office           # add-on 層：Office 文件處理／OCR（可疊在任一 base 上）
 ├── README.md                         # 你正在讀的這份（怎麼用）
 ├── CLAUDE.md                         # AI 代理讀的設計紅線索引（@import docs/design）
 ├── CONTRIBUTING.md · CODE_OF_CONDUCT.md · LICENSE（MIT）
@@ -379,6 +380,7 @@ cat /etc/codex-cli-version    # 查 build 當下凍結的 codex 版本
 |---|---|---|
 | `openspec` | [`Dockerfile.addon.openspec`](Dockerfile.addon.openspec) | [OpenSpec](https://github.com/Fission-AI/OpenSpec) spec-driven 開發框架 |
 | `gcloud` | [`Dockerfile.addon.gcloud`](Dockerfile.addon.gcloud) | 官方 Google Cloud CLI，供雲端主機維運身分使用（見下方「多身分」段的 `ops` 情境） |
+| `office` | [`Dockerfile.addon.office`](Dockerfile.addon.office) | 舊版 Office（`.doc`/`.xls`/`.ppt`）轉檔、繁中字型、掃描件 OCR——讓 agent 讀得懂非純文字文件 |
 
 **用 gcloud**
 
@@ -395,6 +397,38 @@ cat /etc/gcloud-version
 credentials）持久化在 `home/<identity>/.config/gcloud`，跟 `.claude`／
 `.codex` 同一套「拋棄式容器、登入態不拋棄」待遇——登入一次，之後每個
 session 都還在，不用重新登入。
+
+**用 office（讀舊版 Office／掃描件）**
+
+```bash
+agent-sandbox --upgrade --addon office    # 首次：建含 office 的鏈（這層約 1 GB+，會跑一陣子）
+agent-sandbox --addon office
+
+# 容器內：
+cat /etc/office-tools-version             # 各套件版本 + build date
+
+# 舊版 Office → 純文字（繁中可靠路徑）
+soffice --headless -env:UserInstallation=file:///tmp/lo_$$ \
+    --convert-to 'txt:Text (encoded):UTF8' --outdir /tmp 舊報告.doc
+
+# 舊版 Office → PDF（保留排版，看得到圖表）
+soffice --headless -env:UserInstallation=file:///tmp/lo_$$ \
+    --convert-to pdf --outdir /tmp 舊報告.doc
+
+# 掃描件（圖片型 PDF）→ 文字：先轉圖再 OCR（pdftoppm 在 base 就有）
+pdftoppm -r 300 -png 掃描件.pdf /tmp/pg
+tesseract /tmp/pg-1.png /tmp/pg-1 -l chi_tra+eng
+```
+
+`-env:UserInstallation=...` 不是可有可無的裝飾：多個轉檔同時跑會搶同一份
+LibreOffice user profile 而互相卡住，每個呼叫給一個獨立路徑就沒事。
+
+`antiword`／`catdoc` 也在這個 addon 裡，適合「只想快速抽純文字、不想啟動
+LibreOffice」的場合；但**它們對繁中常出現亂碼**，中文文件請走上面的
+`soffice --convert-to`。
+
+> 純文字型 PDF 與各種壓縮檔不需要這個 addon——`pdftotext`／`unar` 是格式
+> 無關的通用能力，兩個 base 都已內建。
 
 **用 OpenSpec**
 
