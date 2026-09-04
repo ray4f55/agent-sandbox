@@ -45,9 +45,17 @@
   build 或互動提示**；版號快照不可覆蓋
 - 退出清孤兒 network 不清 volume → **預設保留 volume 資料**
 - `.agent-sandbox` 設定檔：全面 `key = value`（`[mount]` 用 `path =`）；`[mount]`
-  全域（工具目錄）+ 專案 + CLI **累加**、`[image]`/`[identity]` 專案 only。全域
+  全域（工具目錄）+ 專案 + CLI **累加**、`[image]`/`[identity]`/`[resource]` 專案 only。全域
   mount 開放是 B0033 解除 B0024 紅線（配套：來源標示 + `inherit-global`/
   `--no-config-mounts`）→ **改 mount 解析要保留來源可見性與逃生口**
+- `[resource]` 段（B0059）：逐專案資源上限（`cpus`/`memory`/`pids`），compose 三行改
+  `${VAR:-預設}` 插值 → **預設值的唯一真相是 `docker-compose.yaml` 的字面值，函式端
+  不得持有第二份**；三個變數**只在有覆寫時才傳**且用 `env -u` 清 ambient（傳空字串會
+  讓 podman-compose 的 `-m` 整個不下＝限制靜默消失）→ **不要改成一律傳**
+- 資源值的格式驗證**不可外包給 compose provider**（`cpus` 的垃圾值與 `0` 在
+  podman-compose 是 fail-open＝無限制且靜默；`pids` 的 `-1`/`0` 會被忠實下成 unlimited），
+  且格式比對擋不住 `0` → **「數值 > 0」必須是獨立一步**，少了它就是繞過「三個資源欄位
+  不可拿掉」紅線的後門
 - `[identity]` 段（B0049）：identity 落定邏輯留在
   `_agent-sandbox-apply-identity-config` 內（仿 `base`，不在主函式提早寫死
   `default`）→ **`--upgrade`/`--new-identity` 的旗標白名單檢查必須早於這個

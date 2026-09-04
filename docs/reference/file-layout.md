@@ -18,7 +18,7 @@ Repo 內每個檔案／資料夾的角色、是否進版控、主要讀寫者。
 | `docker-compose.yaml` | 服務／volume／資源限制 | ✅ |
 | `.dockerignore` | build context 排除清單 | ✅ |
 | `.gitignore` | 版控排除清單 | ✅ |
-| `.agent-sandbox`（選用） | **全域**設定檔（工具目錄）：全域 `[mount]`（每個 sandbox 都掛的共用路徑）；逐開發者本機狀態。專案層同名檔放各專案根（`[mount]`/`[image]`/`[identity]`，後兩者僅專案層生效） | ❌（gitignored） |
+| `.agent-sandbox`（選用） | **全域**設定檔（工具目錄）：全域 `[mount]`（每個 sandbox 都掛的共用路徑）；逐開發者本機狀態。專案層同名檔放各專案根（`[mount]`/`[image]`/`[identity]`/`[resource]`，後三者僅專案層生效） | ❌（gitignored） |
 
 ## docs/
 
@@ -62,6 +62,9 @@ Repo 內每個檔案／資料夾的角色、是否進版控、主要讀寫者。
 | `AGENT_SANDBOX_IDENTITY` | `agent-sandbox` 函式（`--identity`，預設 `default`） | `docker-compose.yaml`（選 `home/<identity>/` 掛載來源） |
 | `AGENT_SANDBOX_HOME` | 未設時 `docker-compose.yaml` 預設 `/home/agent-sandbox` | `docker-compose.yaml`（`HOME` 環境變數與掛載目標） |
 | `AGENT_SANDBOX_USER` | `agent-sandbox` 函式（一律＝目前 `--identity` 名稱本身，零特例） | `entrypoint.sh`（動態補 `/etc/passwd`）、bashrc `PS1` |
+| `AGENT_SANDBOX_CPUS` | `agent-sandbox` 函式（專案 `[resource]` 段的 `cpus`；**只在有覆寫時才設**） | `docker-compose.yaml` 的 `cpus:`（`${…:-2.0}`，字面值即預設的唯一真相） |
+| `AGENT_SANDBOX_MEMORY` | 同上（`memory`） | `docker-compose.yaml` 的 `mem_limit:`（`${…:-2g}`） |
+| `AGENT_SANDBOX_PIDS` | 同上（`pids`） | `docker-compose.yaml` 的 `pids_limit:`（`${…:-512}`） |
 | `HOME` | `docker-compose.yaml`：`${AGENT_SANDBOX_HOME:-/home/agent-sandbox}` | 容器內 process |
 
 詳細的命名約定與 label schema：待補（[ ] `docs/reference/labels-and-naming.md`）。

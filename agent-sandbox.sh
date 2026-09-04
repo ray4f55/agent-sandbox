@@ -138,6 +138,8 @@ _agent-sandbox-parse-args() {
   專案根   [mount] path = <spec>（額外掛載；inherit-global = false 可不繼承全域）
            [image] base = <name> / addon = <name>（逐專案預設；CLI 優先、addon 疊加）
            [identity] identity = <name>（逐專案預設身分；CLI 優先，單值覆蓋）
+           [resource] cpus = <n> / memory = <n>g / pids = <n>（逐專案資源上限；
+                      不寫＝沿用 docker-compose.yaml 的預設）
   工具目錄 [mount]（全域額外掛載；路徑須絕對/~，每個 sandbox 都會掛）
   全域 + 專案 + CLI 的 mount 全部累加。容器 git 身分改為直接編
   home/<identity>/.gitconfig（預設 identity 是 home/default/.gitconfig）。
@@ -244,6 +246,7 @@ _agent-sandbox-lint-config() {
             git)   echo "⚠️  $file 的 [git] 段已移除：容器 git 身分改為直接編輯 home/<identity>/.gitconfig（見 docs/guides/upgrade-two-layer-config.md），本段略過" >&2 ;;
             image) [[ "$scope" == global ]] && echo "⚠️  $file 的 [image] 段僅支援專案層，已略過" >&2 ;;
             identity) [[ "$scope" == global ]] && echo "⚠️  $file 的 [identity] 段僅支援專案層，已略過（B0049）" >&2 ;;
+            resource) [[ "$scope" == global ]] && echo "⚠️  $file 的 [resource] 段僅支援專案層，已略過（B0059）" >&2 ;;
         esac
     done < "$file"
 }
@@ -313,6 +316,223 @@ _agent-sandbox-apply-identity-config() {
         echo "📄 讀取 $config_file（[identity] 段：identity=$identity）"
     fi
     [[ -z "$identity" ]] && identity="default"   # 無 CLI 且無檔案設定 → 內建預設（B0015）
+    return 0
+}
+
+# --- 專案 [resource] 段：逐專案資源上限，覆寫 compose 的預設值（B0059）---
+# 讀：（無）／寫：res_cpus res_memory res_pids
+# 專案 only、單值覆蓋（檔案值 > docker-compose.yaml 的 ${VAR:-…} 字面 fallback）。
+# 三個變數初值空字串＝未設定；**本函式不得寫入任何內建預設數字** —— 預設的唯一
+# 真相是 docker-compose.yaml 那三行字面值，函式端持有第二份就會 drift。
+# 值一律在此 fail-fast，**不可外包給 compose provider**：podman-compose 對 cpus 的
+# 垃圾值與 0 是 fail-open（`if cpus:` 為假 → --cpus 整個不下 ＝ 無限制且靜默），
+# 對 pids 的 -1／0 則會忠實下成 unlimited。⚠️ 純格式比對擋不住 0（`<->` match `0`），
+# 數值 > 0 的判定是獨立且必要的一步，少了它 `cpus = 0` 就是繞過
+# docs/design/docker-compose.md「這幾個欄位不可拿掉」紅線的後門。
+# see docs/design/agent-sandbox.md（B0059）
+_agent-sandbox-apply-resource-config() {
+    local config_file="$PWD/.agent-sandbox"
+    local -a res_lines=() applied=()
+    local line key val
+    res_lines=(${(f)"$(_agent-sandbox-config-lines "$config_file" resource)"})
+    for line in "${res_lines[@]}"; do
+        key="${line%%=*}"; key="${key//[[:space:]]/}"
+        val="${line#*=}"
+        [[ "$val" == "$line" ]] && val=""              # 無 '=' 的行
+        val="${val#"${val%%[![:space:]]*}"}"; val="${val%"${val##*[![:space:]]}"}"
+        [[ -z "$val" ]] && continue                    # 空值＝未設定（同 base=／identity=）
+        case "$key" in
+            cpus)
+                if [[ "$val" != <->(.<->|) ]] || (( val <= 0 )); then
+                    echo "❌ [resource] cpus 值無效：'$val'（來自 $config_file [resource] 段）" >&2
+                    echo "   只接受大於 0 的數，例：cpus = 4 或 cpus = 2.5" >&2
+                    echo "   （0 在 compose 語意上等於「不設限制」，等同把欄位拿掉，本段不開放）" >&2
+                    return 1
+                fi
+                res_cpus="$val"; applied+=("cpus=$val") ;;
+            memory)
+                val="${val:l}"                         # 大小寫皆可，內部統一小寫
+                if [[ "$val" != <->[mg] ]] || (( ${val%[mg]} <= 0 )); then
+                    echo "❌ [resource] memory 值無效：'$val'（來自 $config_file [resource] 段）" >&2
+                    echo "   需帶單位 m 或 g（大小寫皆可，內部轉小寫），例：memory = 8g" >&2
+                    echo "   不接受裸數字與 gb／gi（memory = 8 會被當成 8 bytes，故一律拒收）" >&2
+                    return 1
+                fi
+                res_memory="$val"; applied+=("memory=$val") ;;
+            pids)
+                if [[ "$val" != <-> ]] || (( val <= 0 )); then
+                    echo "❌ [resource] pids 值無效：'$val'（來自 $config_file [resource] 段）" >&2
+                    echo "   -1／0 等於取消 process 上限、關掉 fork bomb 防線（provider 會忠實照做）；" >&2
+                    echo "   要放寬請給正整數，例：pids = 1024" >&2
+                    return 1
+                fi
+                res_pids="$val"; applied+=("pids=$val") ;;
+            *) echo "⚠️  $config_file [resource] 段未知鍵 '$key'，略過" >&2 ;;
+        esac
+    done
+    (( ${#applied[@]} > 0 )) && echo "📄 讀取 $config_file（[resource] 段：${(j:、:)applied}）"
+    return 0
+}
+
+# --- 讀 docker-compose.yaml 裡 ${VAR:-預設} 的字面 fallback（B0059）---
+# 預設值的唯一真相在 compose 檔，函式端不得複製一份 → 要顯示就回頭讀那個檔。
+# 純文字 sed，零 provider 呼叫。$1=變數名，印出預設值（找不到則空）。
+_agent-sandbox-compose-default() {
+    sed -n "s/.*\${$1:-\([^}]*\)}.*/\1/p" "$_AGENT_SANDBOX_COMPOSE" 2>/dev/null | head -1
+}
+
+# --- 人類可讀容量字串 → bytes（B0059）---
+# podman stats 用**十進位**單位（4.295GB ＝ 4 GiB），compose 的 `4g` 是 GiB，
+# 兩者混用會讓使用者對不上數字 → 一律先轉 bytes 再統一以 GiB 呈現。
+_agent-sandbox-to-bytes() {
+    printf '%s' "$1" | awk '{
+        v=$0; sub(/[A-Za-z]+$/,"",v);
+        u=$0; sub(/^[0-9.]+/,"",u); u=tolower(u);
+        m=1;
+        if(u=="kb"||u=="k")m=1000; else if(u=="kib")m=1024;
+        else if(u=="mb")m=1000000; else if(u=="mib")m=1048576;
+        else if(u=="gb")m=1000000000; else if(u=="gib")m=1073741824;
+        else if(u=="tb")m=1000000000000; else if(u=="tib")m=1099511627776;
+        printf "%.0f", v*m
+    }'
+}
+
+# --- bytes → GiB 字串（兩位小數）---
+_agent-sandbox-gib() { awk -v b="${1:-0}" 'BEGIN{printf "%.2f", b/1073741824}'; }
+
+# --- 設定檔的記憶體 token（4g／512m）→ bytes ---
+_agent-sandbox-memtoken-bytes() {
+    local t="${1:l}"
+    case "$t" in
+        <->g) awk -v n="${t%g}" 'BEGIN{printf "%.0f", n*1073741824}' ;;
+        <->m) awk -v n="${t%m}" 'BEGIN{printf "%.0f", n*1048576}' ;;
+        *)    printf '0' ;;
+    esac
+}
+
+# --- 啟動資源資訊報表（B0059）---
+# 讀：res_cpus res_memory res_pids proj_name／寫：無
+# **一律印，含零覆寫的情況**：使用者明確要求「沒寫 [resource] 的人也要看得到預設值」，
+# 而且本項的觸發事件正是「machine 給 6 顆、容器只跑得動 2 顆卻查不出原因」——這一行
+# 是診斷用途，不是裝飾。此舉推翻 B0046「日常啟動維持安靜」對本區塊的適用；該紅線原文
+# 即要求此類擴充需「另外評估、明確拍板」（2026-09-04 已拍板，見 B0059）。
+# 呈現原則（源自 CPU 可壓縮／記憶體不可壓縮的非對稱）：記憶體看「實際用量」（上限
+# 加總是常態超賣、不足以判斷），CPU 看「額度加總」（瞬時使用率是無意義的快照）。
+# 上限加總只**列出並標示**、不另發警告。
+# ⚠️ 所有 podman 查詢一律容錯：查不到就少印一段，**絕不阻斷啟動** —— 資訊功能不該
+# 變成新的失敗模式。實測 podman info／stats 各約 0.09s，對「秒起」紅線無感。
+_agent-sandbox-report-resources() {
+    # --- 1) 本次生效的三個值（未覆寫者讀 compose 字面 fallback）---
+    local d_cpus d_mem d_pids
+    d_cpus="$(_agent-sandbox-compose-default AGENT_SANDBOX_CPUS)"
+    d_mem="$(_agent-sandbox-compose-default AGENT_SANDBOX_MEMORY)"
+    d_pids="$(_agent-sandbox-compose-default AGENT_SANDBOX_PIDS)"
+    local eff_cpus="${res_cpus:-$d_cpus}" eff_mem="${res_memory:-$d_mem}" eff_pids="${res_pids:-$d_pids}"
+    eff_cpus="${eff_cpus%.0}"      # 顯示用：compose 字面 2.0 → 2（傳給 compose 的仍是原值）
+    [[ -n "$eff_cpus$eff_mem$eff_pids" ]] || return 0    # compose 讀不到就整段不印
+
+    local mem_b; mem_b="$(_agent-sandbox-memtoken-bytes "$eff_mem")"
+    local -a seg=()
+    [[ -n "$eff_cpus" ]] && seg+=("CPU ${eff_cpus} 核${res_cpus:+*}")
+    [[ -n "$eff_mem" ]]  && seg+=("記憶體 $(_agent-sandbox-gib "$mem_b") GiB${res_memory:+*}")
+    [[ -n "$eff_pids" ]] && seg+=("PID ${eff_pids}${res_pids:+*}")
+    if [[ -n "$res_cpus$res_memory$res_pids" ]]; then
+        echo "⚙️  資源限制：${(j:、:)seg}   （* = 專案 [resource] 段，其餘為預設）"
+    else
+        echo "⚙️  資源限制：${(j:、:)seg}（皆為預設值）"
+    fi
+
+    # --- 2) machine 容量（拿不到就到此為止，只留上面那行）---
+    local info_out mach_cpus mach_mem_b mach_swap_b
+    info_out="$(podman info --format '{{.Host.CPUs}} {{.Host.MemTotal}} {{.Host.SwapTotal}}' 2>/dev/null)"
+    [[ -n "$info_out" ]] || return 0
+    read -r mach_cpus mach_mem_b mach_swap_b <<< "$info_out"
+    [[ "$mach_mem_b" == <-> ]] || return 0
+    local swap_note=""
+    [[ "$mach_swap_b" == 0 ]] && swap_note="，無 swap"
+    echo "🖥  machine ${mach_cpus} 核 / $(_agent-sandbox-gib "$mach_mem_b") GiB${swap_note}"
+
+    # --- 3) 其他在跑的 sandbox（service label ＋ project 前綴雙重比對）---
+    # service=agent 是 compose 依 docker-compose.yaml 的服務名自動貼的，別的專案若也有
+    # 同名服務會被誤抓 → 再比對 project 是否為本工具目錄 basename 開頭（proj_name 去尾
+    # 日期戳即該 basename）。
+    local ps_out line nm proj
+    local -a other=()
+    ps_out="$(podman ps --filter "label=com.docker.compose.service=agent" \
+        --format '{{.Names}}|{{index .Labels "com.docker.compose.project"}}' 2>/dev/null)"
+    for line in ${(f)ps_out}; do
+        [[ -n "$line" ]] || continue
+        nm="${line%%|*}"; proj="${line#*|}"
+        [[ "$proj" == "${proj_name%-*}-"* ]] || continue
+        other+=("$nm")
+    done
+
+    # --- 4) 其他容器的實際用量與上限（stats 一次取兩個數字）---
+    local used_b=0 cap_b=0 have_usage=1
+    if (( ${#other[@]} > 0 )); then
+        local stats_out u l ub lb
+        stats_out="$(podman stats --no-stream --format '{{.Name}}|{{.MemUsage}}' "${other[@]}" 2>/dev/null)"
+        if [[ -z "$stats_out" ]]; then
+            have_usage=0
+            echo "   另有 ${#other[@]} 個 sandbox 在跑（用量取得失敗，略過統計）"
+        else
+            echo "   另有 ${#other[@]} 個 sandbox 在跑："
+            for line in ${(f)stats_out}; do
+                [[ -n "$line" ]] || continue
+                nm="${line%%|*}"
+                u="${${line#*|}%%/*}"; u="${u//[[:space:]]/}"
+                l="${${line#*|}##*/}"; l="${l//[[:space:]]/}"
+                ub="$(_agent-sandbox-to-bytes "$u")"; lb="$(_agent-sandbox-to-bytes "$l")"
+                used_b=$(( used_b + ub )); cap_b=$(( cap_b + lb ))
+                printf '     %-34s 記憶體 %s / %s GiB\n' "$nm" \
+                    "$(_agent-sandbox-gib "$ub")" "$(_agent-sandbox-gib "$lb")"
+            done
+        fi
+    fi
+    # --- 5) 加總（記憶體看實際用量；上限加總只列出＋標示，不另發警告）---
+    # 只有這段與下方 6(b) 真的依賴 podman stats → 守衛只包這兩處。
+    # 曾經在此處放一行 `(( have_usage )) || return 0`，但那會在 stats 失敗時
+    # 連帶吞掉 6(a)（純算術、只用設定檔值與 podman info）與 CPU 額度加總（走
+    # podman inspect），變成「最需要診斷的環境剛好看不到診斷」——與本函式
+    # 「查不到就少印一段」的原則相反。
+    if (( have_usage )); then
+        local total_cap_b=$(( cap_b + mem_b )) cap_flag=""
+        (( total_cap_b > mach_mem_b )) && cap_flag=" ⚠️ 超過 machine"
+        echo "   記憶體：實際已用 $(_agent-sandbox-gib "$used_b") GiB ／ 上限加總 $(_agent-sandbox-gib "$cap_b") GiB（含本次 $(_agent-sandbox-gib "$total_cap_b") GiB${cap_flag}）／ machine $(_agent-sandbox-gib "$mach_mem_b") GiB"
+    fi
+
+    # CPU 額度加總需 podman inspect；拿不到就略過這行（不阻斷）
+    if (( ${#other[@]} > 0 )) && [[ "$mach_cpus" == <-> ]]; then
+        local ins_out nano cpu_sum=0 cpu_total
+        ins_out="$(podman inspect --format '{{.HostConfig.NanoCpus}}' "${other[@]}" 2>/dev/null)"
+        if [[ -n "$ins_out" ]]; then
+            for nano in ${(f)ins_out}; do
+                [[ "$nano" == <-> ]] && (( nano > 0 )) || continue
+                cpu_sum=$(awk -v a="$cpu_sum" -v b="$nano" 'BEGIN{printf "%.4g", a + b/1000000000}')
+            done
+            cpu_total=$(awk -v a="$cpu_sum" -v b="${eff_cpus:-0}" 'BEGIN{printf "%.4g", a+b}')
+            echo "   CPU：額度加總 ${cpu_sum} 核（含本次 ${cpu_total} 核）／ machine ${mach_cpus} 核 —— 超賣正常，全開時互相分"
+        fi
+    fi
+
+    # --- 6) 兩條算術事實警告（結構上不可能誤報）---
+    # (a) 單一請求本身就超過 machine 容量 → 這個容器永遠拿不到它要的量
+    if (( mem_b > mach_mem_b )); then
+        echo "⚠️  這台 podman machine 只有 $(_agent-sandbox-gib "$mach_mem_b") GiB，本次要的 $eff_mem 超過上限，容器拿不到。"
+        echo "   請調大 podman machine，或把 [resource] 的 memory 調小。"
+    fi
+    if [[ "$mach_cpus" == <-> && -n "$eff_cpus" ]] && (( eff_cpus > mach_cpus )); then
+        echo "⚠️  這台 podman machine 只有 ${mach_cpus} 核，本次要的 ${eff_cpus} 核超過上限，容器拿不到。"
+    fi
+    # (b) 現有實際用量 ＋ 本次上限 > machine（算術上界：其他維持現狀、本次用滿）
+    #     依賴 stats → 取不到用量時整條跳過（不能拿 used_b=0 去算，會得出誤導值）
+    if (( have_usage )); then
+        local worst_b=$(( used_b + mem_b ))
+        if (( mem_b <= mach_mem_b && worst_b > mach_mem_b )); then
+            echo "⚠️  現有已用 $(_agent-sandbox-gib "$used_b") GiB ＋ 本次上限 $(_agent-sandbox-gib "$mem_b") GiB = $(_agent-sandbox-gib "$worst_b") GiB，超過 machine 的 $(_agent-sandbox-gib "$mach_mem_b") GiB。"
+            echo "   記憶體超出時是 VM 層 OOM，會砍到哪個容器不受控（CPU 超賣只是變慢，記憶體不是）。"
+        fi
+    fi
     return 0
 }
 
@@ -846,6 +1066,8 @@ agent-sandbox() {
     local launch=""                   # --launch：進容器自動啟動該 base 宣告的工具
     local upgrade=""                  # --upgrade：唯一 build 入口（run 永不 build）
     local no_config_mounts=""         # --no-config-mounts：本次忽略設定檔 mount
+    local res_cpus="" res_memory="" res_pids=""   # 空=未覆寫；[resource] 段落定（B0059）
+                                      # 刻意不放預設數字——唯一真相是 docker-compose.yaml
     local -a addons=()
     local -a cli_mounts=()            # CLI -m 的 spec（與設定檔 [mount] 累加）
     _agent-sandbox-parse-args "$@"
@@ -897,6 +1119,9 @@ agent-sandbox() {
     if [[ -z "$upgrade" ]]; then
         _agent-sandbox-apply-identity-config || return 1
         _agent-sandbox-validate-identity || return 1
+        # 資源上限同為純 runtime 概念，與 build 無關（比照 identity 略過 --upgrade）；
+        # 白名單擋得住 CLI 旗標、擋不住設定檔，略過呼叫才是真正的「build 不碰資源」
+        _agent-sandbox-apply-resource-config || return 1
     fi
 
     local proj_basename proj_name container_name
@@ -953,6 +1178,10 @@ agent-sandbox() {
             echo "   $md"
         done
     fi
+    # 資源資訊（B0059）：一律印本次生效的三個上限 + machine 容量 + 其他 sandbox 的
+    # 實際用量。放在 📎 之後、compose run 之前——與掛載清單同屬「進容器前把隱形狀態
+    # 攤開」，且在 build 輸出之後不會被洗掉。所有 podman 查詢皆容錯、不阻斷啟動。
+    _agent-sandbox-report-resources
 
     # AGENT_SANDBOX_USER：一律用 identity 名稱本身（零特例），讓
     # whoami／banner／PS1 精準反映目前身分（B0044 的 whoami 顯示機制在
@@ -963,11 +1192,25 @@ agent-sandbox() {
     # 簡單、可預期，且徹底不會撞。
     local sandbox_user="$identity"
 
+    # 資源覆寫「有值才傳」＋ env -u 清掉 ambient（B0059，兩者缺一不可）：
+    #   有值才傳 → 零覆寫時三個變數**根本不存在**，走 compose 檔 `${VAR:-…}` 的 unset
+    #     分支，行為與引入本機制前逐字相同（AGENT_SANDBOX_HOME 是同款先例）。
+    #     ⚠️ 不可改成「一律傳空字串」：podman-compose 對空的 mem_limit 是 `if mem:`
+    #     為假 → -m 整個不下 ＝ 記憶體限制靜默消失。
+    #   env -u → 清掉使用者 shell 裡殘留的 export，避免變成跨 session 的隱形放寬
+    #     （本專案否決 CC_EXTRA_MOUNTS 的正是這個理由）。
+    local -a res_env=()
+    [[ -n "$res_cpus" ]]   && res_env+=(AGENT_SANDBOX_CPUS="$res_cpus")
+    [[ -n "$res_memory" ]] && res_env+=(AGENT_SANDBOX_MEMORY="$res_memory")
+    [[ -n "$res_pids" ]]   && res_env+=(AGENT_SANDBOX_PIDS="$res_pids")
+
+    env -u AGENT_SANDBOX_CPUS -u AGENT_SANDBOX_MEMORY -u AGENT_SANDBOX_PIDS \
     AGENT_SANDBOX_IMAGE="${image_name}:${image_tag}" \
     UID=$(id -u) GID=$(id -g) AGENT_SANDBOX_USER="$sandbox_user" \
     AGENT_SANDBOX_IDENTITY="$identity" \
     WORKSPACE_DIR="$PWD" WORKSPACE_NAME="$proj_basename" \
     COMPOSE_PROJECT_NAME="$proj_name" \
+    "${res_env[@]}" \
     podman compose -f "$_AGENT_SANDBOX_COMPOSE" run --rm \
         "${vol_args[@]}" \
         --name "$container_name" "${run_cmd[@]}"

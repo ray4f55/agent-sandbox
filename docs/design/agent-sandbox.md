@@ -207,7 +207,7 @@ volumes 之上、且 `:ro` 生效（實測 mount flag 為 `virtiofs (ro,...)`，
 | 位置 | 角色 | 支援的段 |
 |---|---|---|
 | **工具目錄** `$_AGENT_SANDBOX_DIR/.agent-sandbox` | 全域（關於「你/你的環境」） | `[mount]` |
-| **專案根** `$PWD/.agent-sandbox` | 專案（關於「這個專案需要什麼」） | `[mount]`、`[image]` |
+| **專案根** `$PWD/.agent-sandbox` | 專案（關於「這個專案需要什麼」） | `[mount]`、`[image]`、`[identity]`、`[resource]` |
 
 段的歸屬語意（**不是隨意的不對稱，是 mount/image 本質不同**）：
 
@@ -217,6 +217,12 @@ volumes 之上、且 `:ro` 生效（實測 mount flag 為 `virtiofs (ro,...)`，
   全域預設 base/addon 暫不做（**目前只有 1 base/1 addon，零價值＝YAGNI**；
   前向相容可後加，見 B0016 關聯）。因為只有專案層，關掉只需把該行 `#` 註解掉，
   不需任何旗標 —— 這是它比 mount 簡單的地方。
+- **`[identity]` 專案 only**：「這個專案該用哪個身分」是專案屬性（同 `[image]` 的問法），
+  單值覆蓋。詳見下方「逐專案預設身分」章節（B0049）。
+- **`[resource]` 專案 only**：「這個專案要多少 CPU／記憶體／PID」是專案屬性（「這專案
+  編譯要幾核」），單值覆蓋，預設值來自 `docker-compose.yaml` 的字面 fallback。全域層
+  按 YAGNI 擱置——觸發條件：同一人在 ≥3 個專案重複寫同一組 `[resource]`，或出現明確
+  的機器層需求。詳見下方「逐專案資源限制」章節（B0059）。
 - **git 身分不走設定段**：是 `home/<identity>/.gitconfig` 這個標準 git 檔
   （見下節），不是 `.agent-sandbox` 的某段。**`[git]` 已移除**（早期
   identity-mode 設計棄用）。
@@ -232,7 +238,9 @@ sigil/保留字問題；YAML 要引入 `yq`/python 相依，違反「純 zsh、�
 **合併總則（由型別決定、不可設定）**：
 
 > **清單型（`path`、`addon`）→ 累加**（全域 + 專案 + CLI）；
-> **單值型（`base`）→ 覆蓋**（CLI > 專案 > 內建 claude）。
+> **單值型（`base`、`identity`、`cpus`／`memory`／`pids`）→ 覆蓋**
+> （`base`：CLI > 專案 > 內建 claude；`identity`：CLI > 專案 > 內建 default；
+> 資源三值：專案 > `docker-compose.yaml` 字面 fallback，v1 無 CLI 旗標）。
 
 逃生口：專案 `inherit-global = false`（丟掉全域 mount）、CLI `--no-config-mounts`
 （忽略兩個檔的 mount，只用 `-m`）、`[image]` 那行 `#` 註解（不要該預設）。
@@ -894,6 +902,125 @@ B0015 落地當時刻意先不做「`.agent-sandbox` project-level 預設身分�
 
 （原追蹤於 B0049，2026-08-18 拍板並落地、實機驗證通過。）
 
+## 逐專案資源限制（`.agent-sandbox` 的 `[resource]` 段，B0059）
+
+對應檔：`docker-compose.yaml` 的三個資源欄位、`agent-sandbox.sh` 的
+`_agent-sandbox-apply-resource-config` / `_agent-sandbox-report-resources` /
+`_agent-sandbox-compose-default` 與三個單位換算 helper。
+
+### 動機
+
+`mem_limit` / `cpus` / `pids_limit` 三個值寫死在 repo 內**共用**的
+`docker-compose.yaml`，沒有逐專案覆寫的管道 —— 要放寬只能改共用檔，對所有專案、所有
+使用者一起生效。觸發事件是使用者回報「Podman machine 給了 6 顆，容器卻只跑得動 2 顆，
+是不是有其他限制？」：`cpus` 是 CFS quota 不是 cpuset，容器內 `nproc` 仍顯示 VM 顆數，
+所以「看得到 6 顆、只跑得動 2 顆份」完全不指向設定檔。
+
+### 傳遞管道：環境變數插值（**不是** `compose run` 後綴旗標）
+
+compose 三行值改成 `${AGENT_SANDBOX_MEMORY:-2g}` 這種形式，函式在有覆寫時才傳入對應
+環境變數。插值是本 compose 檔的既有慣例（`image`／`user`／`HOME`／七條身分掛載都是）。
+
+→ **紅線：不要試圖改走「在 `compose run` 後面加資源旗標」**。`docker compose run` 的
+官方選項表**沒有任何資源類旗標**（`-v`／`--cap-add`／`-u`／`-w` 有），而 `podman compose`
+只是把選項原樣轉發給 provider。額外掛載（B0024）之所以能用 `-v`，純粹因為 `-v` 在那張
+表裡 —— **這個先例不可類推到資源限制**。
+
+### 「有值才傳」＋ `env -u`（兩者缺一不可）
+
+```zsh
+local -a res_env=()
+[[ -n "$res_cpus" ]] && res_env+=(AGENT_SANDBOX_CPUS="$res_cpus")
+…
+env -u AGENT_SANDBOX_CPUS -u AGENT_SANDBOX_MEMORY -u AGENT_SANDBOX_PIDS \
+    … "${res_env[@]}" podman compose … run --rm …
+```
+
+- **有值才傳** → 零覆寫時三個變數**根本不存在**，走 compose 的 `:-` unset 分支，行為與
+  引入本機制前逐字相同（`AGENT_SANDBOX_HOME` 是同款先例）。
+  ⚠️ **不可改成「一律傳空字串」**：podman-compose 對空的 `mem_limit` 是 `if mem:` 為假
+  → `-m` 整個不下 ＝ **記憶體限制靜默消失**。同理 `:-` 不可改成 `-`。
+- **`env -u`** → 清掉使用者 shell 裡殘留的 `export AGENT_SANDBOX_CPUS=8`，避免變成跨
+  session 的隱形放寬。這正是本專案當初否決 `CC_EXTRA_MOUNTS` 的理由（見「額外掛載」章
+  「被否決的替代」）。
+- **預設值的唯一真相是 compose 檔的字面值**，zsh 端不得持有第二份（要顯示就用
+  `_agent-sandbox-compose-default` 回頭 `sed` 讀那個檔）。
+
+### 值的驗證：函式端 fail-fast，**不可外包給 provider**
+
+`cpus` 收 `<->(.<->|)`、`memory` 收小寫化後的 `<->[mg]`、`pids` 收 `<->`，**三者都另外
+獨立判定「數值 > 0」**。
+
+→ **紅線：格式比對擋不住 `0`**（`<->` 會 match `0`、`0.0`、`0m`）。少了獨立的數值判定，
+`cpus = 0` 就是一個繞過 docker-compose.md「這幾個欄位不可拿掉」紅線的後門。三個值在
+provider 端的失敗模式**各不相同、不可壓成一句話**：
+
+| 值 | podman-compose | docker-compose（Go） |
+|---|---|---|
+| `cpus` 垃圾值或 `0` | `try_float`→None、`if cpus:` 為假 → **`--cpus` 整個不下＝無限制且靜默**（fail-open） | 載入期 cast 失敗、硬報錯 |
+| `mem_limit` 空字串 | `if mem:` 為假 → `-m` 消失（fail-open） | 同上 |
+| `pids_limit` `-1`／`0` | `is not None` 成立 → **忠實下成 unlimited** | 忠實照做 |
+
+一個 fail-open、一個訊息不指向 `.agent-sandbox`，兩邊都不能倚賴。（本機實測 provider 是
+外部 `/usr/local/bin/docker-compose`。）
+
+`memory` 收窄到小寫單字母是取兩端交集（compose-go 走 `units.RAMInBytes` 較寬、podman
+`-m` 只認 b/k/m/g），順帶讓 `memory = 8`（想寫 8 GiB、收到 8 bytes）fail-fast。
+**刻意不設下限常數**：往下收緊是正當用途（跑不確定安全性第三方 plugin 的 session 反而
+該保守），硬擋會擋掉合法用法。
+
+### 啟動資源資訊：一律印（推翻 B0046 對本區塊的「安靜」紅線）
+
+`_agent-sandbox-report-resources` 在 `📎` 之後、`compose run` 之前印出：本次生效的三個
+上限（覆寫者標 `*`）、machine 容量、其他在跑的 sandbox 逐個的「已用 / 上限」、記憶體與
+CPU 的加總、以及兩條警告。
+
+**為何一律印、連零覆寫也印**：本項的觸發事件正是「限制生效了但使用者查不出來」——這一行
+是**診斷用途**。B0046 的「日常啟動維持安靜」紅線原文即要求此類擴充需「另外評估、明確
+拍板」，2026-09-04 已拍板（原追蹤於 B0046；由 B0059 修改）。
+
+**呈現原則（源自 CPU 可壓縮／記憶體不可壓縮的非對稱）**：
+
+- **記憶體看「實際用量」**，因為上限加總是常態超賣 —— 實測 4 個容器上限加總 16 GiB vs
+  VM 7.72 GiB，而實際只用 2.45 GiB。**上限加總只列出並標示、不據以發警告**（一個在
+  預設配置就會響的警告等於沒有警告）。
+- **CPU 看「額度加總」**，因為瞬時使用率是無意義的快照。
+
+**只有兩條 ⚠️，兩條都是算術事實、結構上不可能誤報**：(a) 單一請求本身就超過 machine
+容量（那個容器永遠拿不到）；(b) 現有實際用量 ＋ 本次上限 > machine（算術上界）。
+兩條一律 ⚠️ **不 ❌**：容器仍起得來，硬擋會把「能跑但慢」變成「不能跑」。
+
+**措辭必須是「已要求」不是「已生效」**：函式在該時點沒有任何證據證明限制真的套上了
+（podman-compose 的 fail-open），印成斷言等於讓可見性紅線的效果變成「讓使用者相信一件
+可能不成立的事」。
+
+→ **紅線**：所有 podman 查詢一律容錯（`2>/dev/null` + 拿不到就少印一段），**絕不阻斷
+啟動** —— 資訊功能不該變成新的失敗模式。守衛範圍要精準：`podman stats` 失敗只該少掉
+依賴它的兩塊，不可連帶吞掉純算術的警告。
+
+**列舉其他 sandbox 用既有 label，不新增專屬 label**：`com.docker.compose.service=agent`
+是 compose 依服務名自動貼的，實測抓得準；再比對 `com.docker.compose.project` 是否為工具
+目錄 basename 開頭，擋掉別的專案剛好也叫 `agent` 的服務。
+
+⚠️ **單位陷阱**：`podman stats` 用**十進位** GB（4 GiB 顯示為 `4.295GB`），compose 的 `4g`
+是 GiB → 一律先轉 bytes 再統一以 GiB 呈現。
+
+### v1 刻意不做
+
+- **CLI 旗標**（`--cpus` 等）：觸發情境是持久性專案屬性、不是 per-session 需求（同 B0049
+  等到痛點真的反覆出現才落地）。逃生口＝把那行 `#` 註解掉，同 `[image]` 的 `addon`。
+  → **前向陷阱**：日後補旗標時，兩張 validator 的 rejected 清單要同步加項，且呼叫順序
+  必須維持在 `_agent-sandbox-apply-resource-config` **之前**，否則在帶 `[resource]` 段的
+  專案跑 `--upgrade` 會被誤判成「有給旗標」而報錯（B0049 那個坑的完整重演）。
+- **全域層 `[resource]`**：YAGNI。⚠️ 誠實記錄的缺口：本項的觸發事件其實是**機器層**
+  抱怨，落地後「這台機器所有 sandbox 都放寬」仍沒有被認可的路徑。
+- **獨立的資源資訊指令**、**跨容器加總的警告**、**數值上限硬擋**、**entrypoint 內回報
+  cgroup 實際生效值**（後者範圍其實更大、受益者是所有人，應另立項）。
+
+（原追蹤於 B0059，2026-09-04 定案並落地；關卡 B（零設定不變性）實機驗證通過：無
+`[resource]` 段時 cgroup 三值與改動前逐字相同。記憶體預設同日由 4g 調降為 2g，理由與
+推導見 `docs/design/docker-compose.md`「資源／安全限制」。）
+
 ## 建立新身分（`--new-identity`，B0046）
 
 對應檔：`agent-sandbox.sh` 的 `_agent-sandbox-validate-new-identity-flags`
@@ -980,6 +1107,9 @@ identity="${identity:-default}"
 的完整討論脈絡於 backlog）。
 
 **範圍界定：只有 `--new-identity` 走逐項回報，日常啟動維持安靜**。
+> ⚠️ 2026-09-04 由 B0059 部分修改：日常啟動路徑現在會**一律印出一行資源限制摘要**
+> （及 machine 容量／其他 sandbox 用量）。那是本段所要求的「另外評估、明確拍板」之
+> 結果，理由見「逐專案資源限制」章節；`--new-identity` 的逐項回報範圍不變。
 `ensure-prereqs`／`ensure-gitconfig` 是共用同一份邏輯（`verbose` 參數
 控制輸出多寡），但日常啟動路徑（`agent-sandbox --identity <name>`）
 呼叫時明確傳 `verbose=0`——那條路徑的既有紅線是「零互動、秒起」，99%
