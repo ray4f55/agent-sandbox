@@ -15,7 +15,7 @@ home/
 # 註：backlog skill 的 _backlog/ 也靠這條被排除（刻意：每位開發者的本地狀態）
 _*
 
-# 專案層 agent-sandbox 設定檔（目前含 [mount] 額外掛載段）：用絕對/家目錄
+# 專案層 agent-sandbox 設定檔（含 [mount]／[image]／[identity]／[resource] 段）：用絕對/家目錄
 # 路徑時屬逐開發者本機狀態，不進版控（用相對路徑想隨 repo 分享則自行 !放行）。
 # 跨專案一勞永逸請設全域 gitignore，see docs/design/agent-sandbox.md「額外掛載」
 .agent-sandbox

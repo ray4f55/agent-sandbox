@@ -86,10 +86,28 @@ compose 仍會走它的副作用 tag 邏輯）。函式對 build 時機與 tag �
 
 - `cap_drop: [ALL]` + `security_opt: [no-new-privileges:true]`：剝奪所
   有 Linux 核心特權，徹底防 SUID 提權
-- `mem_limit: 4g` / `cpus: 2.0` / `pids_limit: 512`：防 agent 暴走拖垮
-  host（Mac M2 上 4g 是安全且夠用的下限；pids 防 fork bomb／失控 build）
+- `mem_limit` / `cpus` / `pids_limit`：防 agent 暴走拖垮 host。三個值自 B0059 起
+  改用 `${VAR:-預設}` 插值，由專案 `.agent-sandbox` 的 `[resource]` 段覆寫；
+  **compose 檔裡的字面值是預設的唯一真相**，`agent-sandbox` 函式端不得持有第二份。
+  預設 `mem_limit: 2g`（2026-09-04 由 4g 調降）—— 依「同時開 N 個 sandbox 也不該
+  拖垮 VM」推導：實測開發機的 podman machine 為 7.72 GiB 且**無 swap**，常態同時開
+  4 個 sandbox，7.72 ÷ 4 ≈ 1.9 GiB。需要更多的專案用 `[resource]` 自行放寬。
+  ⚠️ 原值 4g **沿襲自 B0007 之前的 `deploy:` 區塊、從未經過評估**——B0007 解的是
+  「`deploy.resources` 被非 Swarm compose 整段忽略」（當時三個限制根本沒生效），
+  它只把值搬到正確欄位讓它們生效，全文沒有一句在討論 4 GiB 夠不夠；本檔舊版那句
+  「Mac M2 上 4g 是安全且夠用的下限」是寫文件時加的無來源描述，已移除。
+  `cpus` 是 CFS quota 不是 cpuset → 容器內 `nproc` 仍顯示 VM 顆數，要確認實際生效值
+  請在容器內 `cat /sys/fs/cgroup/cpu.max`（2 核 = `200000 100000`）。
+  `pids_limit` 計的是 task（含執行緒），調高 `cpus` 後平行 build 容易撞到，症狀
+  `fork: Resource temporarily unavailable` 不指向設定。
 - **不用** `deploy.resources.limits`：後者是 Swarm 專用，非 Swarm 的
   `docker compose up` 會整段忽略；用 Compose v2 service 頂層欄位才是
   單機正式支援
 
-→ 這些值有調整空間（例如改用更大的記憶體上限），但**不要拿掉這幾個欄位**。
+→ 這些值有調整空間（逐專案走 `[resource]` 段），但**不要拿掉這幾個欄位**。
+這條紅線自 B0059 起**同時體現在 parser**：`[resource]` 拒收 `0`／負數（`cpus = 0` 在
+compose 語意上等於「不設限制」，等同把欄位拿掉），驗證放在 `agent-sandbox` 函式端而
+**不外包給 compose provider**——實測本機 provider 是外部 `docker-compose`（cast 失敗
+會硬失敗），但 podman-compose 那條路對 `cpus` 的垃圾值與 `0` 是 **fail-open**（旗標整個
+不下＝無限制且靜默），對 `pids` 的 `-1`／`0` 則會忠實下成 unlimited。一個 fail-open、
+一個訊息不指向 `.agent-sandbox`，兩邊都不能倚賴。（原追蹤於 B0059。）

@@ -41,6 +41,23 @@
 #
 # identity = ops         # 例：管雲端主機的專案固定用 ops 身分
 
+[resource]  # 僅專案層生效（放全域檔會被 ⚠️ 略過）
+# 這個專案要的容器資源上限。三個鍵各自獨立、都可省略；沒寫的沿用
+# docker-compose.yaml 的預設（**那三行字面值是預設的唯一真相**）。整段不寫
+# ＝行為與沒有本段時完全相同。這次不想套用？把該行 # 註解掉即可。
+#
+# cpus   = 4     # CFS quota（cgroup cpu.max），不是 cpuset —— 容器內 nproc 仍顯示
+#                #   VM 顆數；要確認有沒有生效請在容器內 cat /sys/fs/cgroup/cpu.max
+#                #   （4 核 = 400000 100000）
+# memory = 6g    # <整數><m|g>，大小寫皆可；不接受裸數字（8 會被當成 8 bytes）與 gb/gi
+# pids   = 1024  # 計的是 task（含執行緒）不是 process。調高 cpus 後平行 build 的執行
+#                #   緒數會漲、容易撞到預設值，症狀 fork: Resource temporarily
+#                #   unavailable 完全不指向本檔
+#
+# 三個鍵一律拒收 0／負數 —— 那等於把 docker-compose.yaml 的欄位拿掉，本段不是它的後門。
+# ⚠️ 記憶體是不可壓縮資源：多個容器各自在額度內、加起來超過 VM 記憶體時會觸發 VM 層
+#    OOM 且砍誰不受控；CPU 超賣只是變慢、會自我修正。兩者把關力道刻意不同。
+
 # ============================================================
 # 想設定全域 [mount]（每個專案都會掛的共用資料夾）？把 [mount] 段複製到
 # 「agent-sandbox 工具目錄」自己的 .agent-sandbox（不是專案根）即可，
