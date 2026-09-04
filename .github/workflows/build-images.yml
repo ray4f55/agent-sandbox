@@ -85,6 +85,16 @@ jobs:
             addon: openspec
           - base: codex
             addon: openspec
+          - base: claude
+            addon: gcloud
+          - base: codex
+            addon: gcloud
+          # office：LibreOffice ＋ CJK 字型，約 1 GB+ ——這兩顆是本 matrix 裡
+          # 最貴的雙架構 build（B0058）。日後嫌慢先降這兩筆的規格，別動其他。
+          - base: claude
+            addon: office
+          - base: codex
+            addon: office
     steps:
       - uses: actions/checkout@v4
 

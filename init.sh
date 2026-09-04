@@ -294,7 +294,7 @@ check_mirror() {
     for d in $MIRROR_DIRS; do
         if [ -d "$SCRIPT_DIR/$d" ]; then ok "$d/"; else miss "$d/ → --apply 會建立"; missing=1; fi
     done
-    if [ -e "$SCRIPT_DIR/$MIRROR_FILE" ]; then ok "$MIRROR_FILE"; else miss "$MIRROR_FILE → --apply 會建立"; missing=1; fi
+    if [ -s "$SCRIPT_DIR/$MIRROR_FILE" ]; then ok "$MIRROR_FILE"; else miss "$MIRROR_FILE → --apply 會建立/修復（0 bytes 視同缺檔——claude CLI 無法解析空檔案）"; missing=1; fi
     [ "$missing" = 1 ] && N_MISS=$((N_MISS+1))
     info "mise-cache volume 由 agent-sandbox 首次啟動時自動建立（不在此處理）"
     info "home/default/.gitconfig（容器 git 身分）：--apply 會從 host git 身分生成；之後是你自己的標準 git 檔（改身分直接編它或 per-repo git config --local）"
@@ -382,11 +382,18 @@ ask() {  # ask "問題" [y] → 0=yes 1=no；第二參數給 "y" 則預設 Yes�
 # --- 1. 建鏡射目錄 ---
 need_mirror=0
 for d in $MIRROR_DIRS; do [ -d "$SCRIPT_DIR/$d" ] || need_mirror=1; done
-[ -e "$SCRIPT_DIR/$MIRROR_FILE" ] || need_mirror=1
+[ -s "$SCRIPT_DIR/$MIRROR_FILE" ] || need_mirror=1
 if [ "$need_mirror" = 1 ]; then
-    if ask "要建立缺少的 host 鏡射目錄（home/default/...，預設身分）嗎？"; then
+    if ask "要建立/修復缺少的 host 鏡射目錄（home/default/...，預設身分）嗎？"; then
         mkdir -p "$SCRIPT_DIR/home/default/.claude" "$SCRIPT_DIR/home/default/.codex" "$SCRIPT_DIR/home/default/.config/mise"
-        [ -e "$SCRIPT_DIR/$MIRROR_FILE" ] || touch "$SCRIPT_DIR/$MIRROR_FILE"
+        # 內容須是 `{}`，不能是 touch 出來的 0 bytes：claude CLI 直接對
+        # 內容做 JSON.parse()，空檔案會被判定成「損毀設定檔」，逼出一個
+        # 互動式的「Reset with default configuration」選單（B0046 落地
+        # 測試時發現，agent-sandbox.sh 的 ensure-prereqs 同步修正）。用
+        # -s（存在且非空）而非 -e：0 bytes 對這個檔案沒有合法的「刻意
+        # 留空」語意，純粹是壞檔案，視同缺檔重建，讓舊的殘留空檔也能
+        # 靠重跑 --apply 自動修復。
+        [ -s "$SCRIPT_DIR/$MIRROR_FILE" ] || printf '{}' > "$SCRIPT_DIR/$MIRROR_FILE"
         echo "✅ 已建立鏡射目錄"
     fi
 fi

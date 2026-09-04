@@ -9,9 +9,14 @@ ARG AGENT_HOME=/home/agent-sandbox
 ARG AGENT_TOOLS=/opt/agent-tools
 
 # 1. 安裝 Linux 常見的基礎開發工具（與 base.claude 同組，維持各 base 容器體驗一致）
+# bash-completion：光裝套件不夠，還要在下方 bashrc 明確 source 才會生效
+# （非登入 shell 不讀 /etc/profile.d/，見下方對應 RUN 註解，B0052）
+# poppler-utils／unar：格式無關的通用文件能力（PDF 抽文字/轉圖、解壓縮）；
+# 舊版 Office 與 OCR 走 --addon office，不進 base (see docs/design/agent-sandbox.md B0058)
 RUN apt-get update && apt-get install -y \
     git curl ca-certificates jq less bash libicu-dev \
-    postgresql-client \
+    postgresql-client bash-completion rsync vim \
+    poppler-utils unar \
     && rm -rf /var/lib/apt/lists/*
 
 
@@ -26,6 +31,9 @@ RUN curl https://mise.run | MISE_INSTALL_PATH=/usr/local/bin/mise MISE_INSTALL_M
 ENV MISE_DATA_DIR=${AGENT_TOOLS}/mise-data
 ENV PATH="${AGENT_TOOLS}/mise-data/shims:$PATH"
 RUN mkdir -p "$MISE_DATA_DIR" && chmod 777 "$MISE_DATA_DIR"
+
+# 啟用 bash-completion（同 base.claude，理由與紅線見該檔註解，B0052）
+RUN echo 'if [ -f /usr/share/bash-completion/bash_completion ]; then . /usr/share/bash-completion/bash_completion; fi' >> /etc/bash.bashrc
 RUN echo 'eval "$(mise activate bash)"' >> /etc/bash.bashrc
 
 # 身分可視化 PS1（同 base.claude，理由與紅線見該檔註解，B0015）
@@ -75,7 +83,8 @@ WORKDIR /workspace
 # =========================================================
 # 7. entrypoint：runtime UID 動態補 /etc/passwd／/etc/group 紀錄（同 base.claude）
 # =========================================================
-RUN chmod 666 /etc/passwd /etc/group
+# /etc/ssh/ssh_config 一併開放（B0050，同 base.claude 理由）
+RUN chmod 666 /etc/passwd /etc/group /etc/ssh/ssh_config
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod a+rx /usr/local/bin/entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

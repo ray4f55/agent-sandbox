@@ -1,0 +1,62 @@
+# =========================================================
+# Office 文件處理 add-on（base-agnostic）
+# =========================================================
+# 讓容器內的 agent 讀得懂「不是純文字」的文件：舊版 Office
+# （.doc / .xls / .ppt）保真轉檔、繁中字型、掃描件 OCR。
+#
+# 為什麼是 addon 不是 base：這一層約 1 GB+（LibreOffice ＋ CJK 字型），
+# 只有真的要處理 Office 檔的專案才該付這個體積；格式無關的通用能力
+# （poppler-utils／unar）已經在兩個 base 裡。
+# see docs/design/agent-sandbox.md「Office 文件處理 addon」（B0058）
+#
+# 疊在任何 base image 上：開頭 `ARG BASE_IMAGE` + `FROM ${BASE_IMAGE}`，
+# 由 agent-sandbox 函式自動帶上 BASE_IMAGE / target tag。
+# 手動 build 範例（急用時只建這一層，base 用現成的）：
+#   podman build -f Dockerfile.addon.office \
+#       --build-arg BASE_IMAGE=agent-sandbox-claude:latest \
+#       -t agent-sandbox-claude-office:latest .
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+# 裝「當下最新」（保鮮哲學同 claude/codex/openspec/gcloud），版本固化進
+# /etc/office-tools-version 可追溯。
+#
+# 各套件的角色：
+# - libreoffice-{writer,calc,impress,draw}：舊版 Office 的**可靠**讀取路徑
+#   （headless --convert-to）。antiword/catdoc 只能抽純文字且對繁中常亂碼，
+#   在這裡是「不想啟動 LibreOffice 時的快速路徑」，不是替代品。
+# - fonts-noto-cjk / fonts-arphic-uming：LibreOffice 轉 PDF/圖片時的 CJK
+#   字型來源，缺了中文會變成豆腐方塊——是上一項的必要配套，不是選配。
+# - tesseract-ocr + chi-tra：掃描件（圖片型 PDF）OCR；英文語言包由
+#   tesseract-ocr 自身相依帶入。搭配 base 已有的 pdftoppm 先轉圖再辨識。
+#
+# 刻意不加 --no-install-recommends：Recommends 裡可能含轉檔 filter／字型，
+# 砍掉的風險是某些格式轉出來壞掉。瘦身（約可省 200 MB 的 JRE）留待日後
+# 真的嫌大再單獨評估。see docs/design/agent-sandbox.md（B0058）
+RUN apt-get update && apt-get install -y \
+    libreoffice-writer libreoffice-calc libreoffice-impress libreoffice-draw \
+    fonts-noto-cjk fonts-arphic-uming \
+    antiword catdoc \
+    tesseract-ocr tesseract-ocr-chi-tra \
+    && rm -rf /var/lib/apt/lists/* \
+    && dpkg-query -W -f='${Package} ${Version}\n' \
+        libreoffice-writer libreoffice-calc libreoffice-impress libreoffice-draw \
+        fonts-noto-cjk fonts-arphic-uming antiword catdoc \
+        tesseract-ocr tesseract-ocr-chi-tra \
+        > /etc/office-tools-version \
+    && echo "build date: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /etc/office-tools-version
+
+# 版本記錄用 dpkg-query 而非 `soffice --version`：後者要在 build 期啟動一次
+# headless LibreOffice（在 CI 的 QEMU 跨架構模擬下特別慢且多一個失敗點），
+# 查套件版本本來就是 dpkg 的工作，結果一樣可追溯。
+
+# 靜態 LABEL：指路牌，真實版本以 /etc/office-tools-version 為準（classic
+# builder 不支援動態 LABEL 內容，同 openspec/gcloud addon 慣例）
+LABEL office-tools.version-file="/etc/office-tools-version"
+
+# 用法備忘（不影響 build）：LibreOffice headless 併發轉檔會搶同一份 user
+# profile，多個轉換同時跑要各自帶 -env:UserInstallation，例如：
+#   soffice --headless -env:UserInstallation=file:///tmp/lo_$$ \
+#       --convert-to 'txt:Text (encoded):UTF8' --outdir /tmp in.doc
+# 詳細用法見 README「用 office」段。

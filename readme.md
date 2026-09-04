@@ -38,7 +38,7 @@ host 檔案、登入憑證、其他專案都不會受影響。
 ## 主要設計
 
 - **拋棄式容器**：每次 `agent-sandbox` 啟一個 `--rm` 容器，退出消失（你的程式碼留 host）
-- **資源／權限限制**：4GB RAM、2 核 CPU、512 process 上限；剝奪所有 Linux 核心特權、防 SUID 提權
+- **資源／權限限制**：**預設** 2GB RAM、2 核 CPU、512 task 上限（可逐專案明確 opt-in 放寬，放寬時啟動會印出來）；剝奪所有 Linux 核心特權、防 SUID 提權
 - **跨 session 共用語言快取**：mise-cache volume 一份持久化，多專案共用同一份 Python/Go/...
 - **里程碑凍結**：具名 tag image 永不被自動覆寫，能隨時跑回某歷史版本
 - **自動清理**：退出後移除孤兒 network、保留 volume 資料
@@ -55,6 +55,8 @@ agent-sandbox/
 ├── Dockerfile.base.claude            # base image：Claude Code（預設）
 ├── Dockerfile.base.codex             # base image：OpenAI Codex
 ├── Dockerfile.addon.openspec         # add-on 層：OpenSpec（可疊在任一 base 上）
+├── Dockerfile.addon.gcloud           # add-on 層：Google Cloud CLI（可疊在任一 base 上）
+├── Dockerfile.addon.office           # add-on 層：Office 文件處理／OCR（可疊在任一 base 上）
 ├── README.md                         # 你正在讀的這份（怎麼用）
 ├── CLAUDE.md                         # AI 代理讀的設計紅線索引（@import docs/design）
 ├── CONTRIBUTING.md · CODE_OF_CONDUCT.md · LICENSE（MIT）
@@ -149,6 +151,7 @@ source /path/to/agent-sandbox/agent-sandbox.sh
 > - `agent-sandbox v1.0.0` —— 跑某個版號快照（rollback 用）
 > - `agent-sandbox --addon openspec` —— 疊加 add-on（見下方「進階：Add-on 變體」）
 > - `agent-sandbox --identity ops` —— 切換身分資料來源（見下方「多身分」）
+> - `agent-sandbox --new-identity ops` —— 建立新身分骨架（見下方「多身分」）
 >
 > 它是 **zsh** 函式（用到 zsh 限定語法）；從 bash source 會提示需要 zsh。
 > 設計取捨見 [`docs/design/agent-sandbox.md`](docs/design/agent-sandbox.md)。
@@ -224,7 +227,7 @@ source /path/to/agent-sandbox/agent-sandbox-codex-wrapper.sh
     > **為何 trust 不持久化**（每 session 都得重做）：路徑空間撞名時，舊 trust 會把惡意 mise.toml 自動視為已信任，可能洩漏 `~/.claude` token；詳見 [`docs/design/mise.md`](docs/design/mise.md)。
 4. 啟動 AI 代理：
     第一次使用時輸入 claude，它會給連結，在瀏覽器登入（只需登入一次，因為身份驗證檔寫在掛載進去的路徑）
-    之後可以大膽地輸入 claude --dangerously-skip-permissions，放手讓 Agent 幫您寫 code，就算它想亂砍系統檔案或無限迴圈，也會被沙盒與 4GB 記憶體限制攔住
+    之後可以大膽地輸入 claude --dangerously-skip-permissions，放手讓 Agent 幫您寫 code，就算它想亂砍系統檔案或無限迴圈，也會被沙盒與記憶體上限（預設 2GB，可逐專案調整）攔住
 
     > 想省一步：`agent-sandbox --launch` 會在進容器當下直接起 claude（claude 退出後
     > 留在 bash 可續作業）；步驟 2＋4 併一行。需要先裝語言環境（步驟 3）的場景就別用
@@ -295,6 +298,7 @@ $ agent-sandbox
 
 $ agent-sandbox --upgrade
 🔄 升級重建（--no-cache）：agent-sandbox-claude
+   （鏈由目前目錄解析：CLI > .agent-sandbox [image] 段 > 預設 claude；換目錄執行可能建到不同鏈）
    完成後打 tag：:latest + :v1.0.0（自動配號，首版）
 ⬇️  刷新 base image：node:22-slim
 🔧 build agent-sandbox-claude:latest …
@@ -309,6 +313,7 @@ Claude 出新版想升級：
 ```
 $ agent-sandbox --upgrade
 🔄 升級重建（--no-cache）：agent-sandbox-claude
+   （鏈由目前目錄解析：CLI > .agent-sandbox [image] 段 > 預設 claude；換目錄執行可能建到不同鏈）
    完成後打 tag：:latest + :v1.1.0（自動配號，前一版 v1.0.0）
 …
 ```
@@ -374,6 +379,56 @@ cat /etc/codex-cli-version    # 查 build 當下凍結的 codex 版本
 | Add-on | Dockerfile | 用途 |
 |---|---|---|
 | `openspec` | [`Dockerfile.addon.openspec`](Dockerfile.addon.openspec) | [OpenSpec](https://github.com/Fission-AI/OpenSpec) spec-driven 開發框架 |
+| `gcloud` | [`Dockerfile.addon.gcloud`](Dockerfile.addon.gcloud) | 官方 Google Cloud CLI，供雲端主機維運身分使用（見下方「多身分」段的 `ops` 情境） |
+| `office` | [`Dockerfile.addon.office`](Dockerfile.addon.office) | 舊版 Office（`.doc`/`.xls`/`.ppt`）轉檔、繁中字型、掃描件 OCR——讓 agent 讀得懂非純文字文件 |
+
+**用 gcloud**
+
+```bash
+agent-sandbox --upgrade --addon gcloud    # 首次：建含 gcloud 的鏈
+agent-sandbox --identity ops --addon gcloud
+
+# 容器內：
+gcloud --version
+cat /etc/gcloud-version
+```
+
+登入態（`gcloud auth login` 的 OAuth token／application-default
+credentials）持久化在 `home/<identity>/.config/gcloud`，跟 `.claude`／
+`.codex` 同一套「拋棄式容器、登入態不拋棄」待遇——登入一次，之後每個
+session 都還在，不用重新登入。
+
+**用 office（讀舊版 Office／掃描件）**
+
+```bash
+agent-sandbox --upgrade --addon office    # 首次：建含 office 的鏈（這層約 1 GB+，會跑一陣子）
+agent-sandbox --addon office
+
+# 容器內：
+cat /etc/office-tools-version             # 各套件版本 + build date
+
+# 舊版 Office → 純文字（繁中可靠路徑）
+soffice --headless -env:UserInstallation=file:///tmp/lo_$$ \
+    --convert-to 'txt:Text (encoded):UTF8' --outdir /tmp 舊報告.doc
+
+# 舊版 Office → PDF（保留排版，看得到圖表）
+soffice --headless -env:UserInstallation=file:///tmp/lo_$$ \
+    --convert-to pdf --outdir /tmp 舊報告.doc
+
+# 掃描件（圖片型 PDF）→ 文字：先轉圖再 OCR（pdftoppm 在 base 就有）
+pdftoppm -r 300 -png 掃描件.pdf /tmp/pg
+tesseract /tmp/pg-1.png /tmp/pg-1 -l chi_tra+eng
+```
+
+`-env:UserInstallation=...` 不是可有可無的裝飾：多個轉檔同時跑會搶同一份
+LibreOffice user profile 而互相卡住，每個呼叫給一個獨立路徑就沒事。
+
+`antiword`／`catdoc` 也在這個 addon 裡，適合「只想快速抽純文字、不想啟動
+LibreOffice」的場合；但**它們對繁中常出現亂碼**，中文文件請走上面的
+`soffice --convert-to`。
+
+> 純文字型 PDF 與各種壓縮檔不需要這個 addon——`pdftotext`／`unar` 是格式
+> 無關的通用能力，兩個 base 都已內建。
 
 **用 OpenSpec**
 
@@ -532,8 +587,8 @@ path = ~/refs/shared:shared:ro   # 全域路徑須絕對 / ~（相對沒有基�
 - 某次想完全忽略設定檔、只用 `-m`：`agent-sandbox --no-config-mounts -m …`。
 
 > `.agent-sandbox` 是統一設定檔、**像 git config 一樣分兩處**：**專案根**放
-> `[mount]`／`[image]`（這個專案要什麼）；**工具目錄**放全域 `[mount]`（你每次
-> 都想掛的）。`[image]` 只認專案層（放全域會 ⚠️ 略過）；未知段前向相容略過；
+> `[mount]`／`[image]`／`[identity]`／`[resource]`（這個專案要什麼）；**工具目錄**放全域 `[mount]`（你每次
+> 都想掛的）。`[image]`／`[identity]`／`[resource]` 只認專案層（放全域會 ⚠️ 略過）；未知段前向相容略過；
 > 段標頭須獨佔一行。容器 git 身分不在這裡，是 `home/<identity>/.gitconfig`（見下節）。
 
 **進不進版控？看你寫哪種路徑**：
@@ -621,18 +676,89 @@ agent-sandbox                    # 不帶旗標＝ --identity default（一般�
 區隔。新增身分：
 
 ```bash
-mkdir -p home/ops/.claude home/ops/.codex home/ops/.config/mise home/ops/.ssh
+agent-sandbox --new-identity ops
 ```
+
+純建立動作，不進容器；逐項列出每個子項是「已存在」還是「新建/補上」，不會
+默默做掉任何一步。身分已存在時重跑也安全，天生冪等（不覆蓋既有內容），可以
+當健檢用——例如某個子目錄不小心被刪掉，重跑一次就補回來。建完照常
+`agent-sandbox --identity ops` 啟動。
 
 `--identity` 指到不存在的資料夾會直接報錯（不會靜默幫你建一個空的），支援
 Tab 補全。進容器後 shell prompt 會帶 `[<identity>]` 前綴，提醒目前是哪個身分。
 
+**逐專案預設身分（`.agent-sandbox` 的 `[identity]` 段）**
+
+某專案本質上就該用同一個身分（例如專門管雲端主機的 `ops` 專案），在該專案根
+的 `.agent-sandbox` 加 `[identity]` 段，之後在該專案打 `agent-sandbox` 不用
+再手動加 `--identity`：
+
+```ini
+# ~/repos/ai-ops/.agent-sandbox
+[identity]
+identity = ops
+```
+
+啟動時會印 `📄 讀取 …/.agent-sandbox（[identity] 段：identity=ops）`——身分
+切換影響風險層級（可能帶 SSH 金鑰），這條可見性訊息不能省。合成規則：單值
+覆蓋，`--identity` > 檔案 `identity` > 內建 `default`；跟 `[image]` 的
+`base` 同一套規則。`[identity]` 只有專案層（跟 `[image]` 一樣），這次想改用
+別的身分，CLI `--identity` 直接覆蓋即可。
+
 > 設計取捨（為何容器內路徑固定不隨身分變動、為何預設身分資料夾叫
-> `default`）見 [`docs/design/agent-sandbox.md`](docs/design/agent-sandbox.md)
-> 「多身分」段。本機已有舊版單一身分資料夾 `home/node/`？見
+> `default`、`--new-identity` 為何不牴觸 `--identity` 的 fail-fast 紅線）見
+> [`docs/design/agent-sandbox.md`](docs/design/agent-sandbox.md)「多身分」與
+> 「建立新身分」段。本機已有舊版單一身分資料夾 `home/node/`？見
 > [`docs/guides/migrate-home-node-to-default.md`](docs/guides/migrate-home-node-to-default.md)。
 
 ---
+
+### 逐專案資源限制（`[resource]`）
+
+容器預設**最多 2GB 記憶體、2 核 CPU、512 個 task**。要編譯／跑測試的專案可以在該專案根
+的 `.agent-sandbox` 放寬：
+
+```ini
+[resource]
+cpus   = 4
+memory = 6g
+pids   = 1024
+```
+
+三個鍵各自獨立、都可省略；沒寫的沿用 `docker-compose.yaml` 的預設。**整段不寫＝行為完全
+不變。** 不想套用某一項就把那行 `#` 註解掉（專案 only，不需要旗標）。
+
+啟動時一定會印出目前生效的值，順便告訴你這台機器有多少、其他 sandbox 用掉多少：
+
+```
+⚙️  資源限制：CPU 4 核*、記憶體 6.00 GiB*、PID 512   （* = 專案 [resource] 段，其餘為預設）
+🖥  machine 6 核 / 7.72 GiB，無 swap
+   另有 3 個 sandbox 在跑：
+     bancs-llm-wiki-202432-95199        記憶體 1.14 / 4.00 GiB
+     …
+   記憶體：實際已用 1.94 GiB ／ 上限加總 12.00 GiB（含本次 18.00 GiB ⚠️ 超過 machine）／ machine 7.72 GiB
+   CPU：額度加總 6 核（含本次 10 核）／ machine 6 核 —— 超賣正常，全開時互相分
+```
+
+要調 podman machine 的配額（Podman Desktop 的 Settings → Resources）時，這些數字就在眼前。
+
+**幾個會踩到的地方**：
+
+- **`cpus` 是時間配額不是綁定核心**：容器內 `nproc` 仍顯示 VM 的顆數，`make -j$(nproc)`
+  之類會開太多。要確認實際生效值，進容器 `cat /sys/fs/cgroup/cpu.max`
+  （2 核 = `200000 100000`，4 核 = `400000 100000`）。
+- **調高 `cpus` 通常要一起調 `pids`**：`pids` 計的是 task（含執行緒），平行 build 很容易
+  撞到 512，症狀是 `fork: Resource temporarily unavailable`，完全不指向這個設定。
+- **`memory` 要帶單位**：`6g`／`512m`，大小寫皆可。`memory = 8` 會被拒絕（那在 compose
+  語意上是 8 bytes，不是 8GB）；`6gb`／`6Gi` 也不收。
+- **`0` 和負數一律拒絕**：那等於取消限制，本段不是關掉沙盒防線的後門。
+- **記憶體超出的後果比 CPU 嚴重**：CPU 超賣只是大家變慢、會自我修正；記憶體是所有容器
+  **實際**用量加起來超過 VM 就觸發 VM 層 OOM，**砍到哪個容器不受控**（可能砍掉另一個
+  session 跑到一半的 build）。所以上面那行「本次若用滿會超過」的 ⚠️ 值得看一眼。
+- **被莫名砍掉時先想到這裡**：容器撞到自己的記憶體上限時，通常只看到 process 突然消失或
+  build 中斷，不會有訊息說是記憶體。先把 `memory` 調高或調大 machine 再試。
+- **只讀 `$PWD/.agent-sandbox`、不往上找**：在專案的子目錄啟動時這段設定不會生效（同
+  `[image]`／`[identity]`）。
 
 ### 使用 GHCR 預建 image（免本機 build）
 

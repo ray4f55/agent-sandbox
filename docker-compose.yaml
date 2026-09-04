@@ -51,6 +51,11 @@ services:
       # （不走 -m 額外掛載機制——一旦 identity 本身就是一整份專屬資料夾，
       # .ssh 沒理由被特殊對待）。預設 identity（default）留空即可，無害。
       - ./home/${AGENT_SANDBOX_IDENTITY:-default}/.ssh:${AGENT_SANDBOX_HOME:-/home/agent-sandbox}/.ssh
+      # B0047：gcloud CLI（--addon gcloud）的登入態（OAuth token／
+      # application-default credentials）持久化，跟 claude/codex 同一套
+      # 「拋棄式容器、登入態不拋棄」待遇。對沒裝 gcloud addon 的身分只是
+      # 空資料夾、無害（同 .codex 全掛的邏輯，B0016 方案 A）。
+      - ./home/${AGENT_SANDBOX_IDENTITY:-default}/.config/gcloud:${AGENT_SANDBOX_HOME:-/home/agent-sandbox}/.config/gcloud
       # 注意：「mise trust 紀錄」刻意「不」持久化 — 它存在 ~/.local/state/mise/，是純路徑 hash
       # (不同專案會撞同一個 /workspace/<name> 路徑空間，持久化會把「A 的信任」自動套到 B)
       # 留在容器內、隨容器消失 = 每次 session 由使用者重新確認，避免惡意 mise.toml 透過 hook 偷 token
@@ -72,9 +77,23 @@ services:
     # 注意：原本用 deploy.resources.limits，但那是 Docker Swarm 專用語法，
     # 非 swarm 的 `docker compose up` 會「整段忽略」(podman-compose 部分版本才會
     # 好心翻譯，行為不保證)。改用下面 Compose v2 service 頂層欄位，單機正式支援。
-    mem_limit: 4g            # 最多 4GB 記憶體
-    cpus: 2.0                # 最多 2 核心 CPU
-    pids_limit: 512          # 最多 512 個 process — 防 fork bomb / 失控 build 吃光 host
+    #
+    # B0059：三個值改用 ${VAR:-預設} 插值（同本檔既有的 image/user/HOME 慣例），
+    # 讓專案 .agent-sandbox 的 [resource] 段能逐專案覆寫。
+    # 🚨 下面三個字面值是預設的**唯一真相**：agent-sandbox 函式在沒有覆寫時完全不設
+    #    這三個變數（並用 env -u 連使用者 shell 的殘留 export 一起清掉），走的是 `:-`
+    #    的 unset 分支 —— 與引入本機制前的行為逐字相同。函式端不得再持有一份 2.0/2g/512。
+    # 🚨 `:-` 不可改成 `-`，也不要改成「函式一律傳空字串」：podman-compose 對空的
+    #    mem_limit 是 `if mem:` 為假 → `-m` 整個不下 ＝ **記憶體限制靜默消失**。
+    # 🚨 值的格式驗證在 agent-sandbox 函式端 fail-fast，不可外包給 provider：cpus 的
+    #    垃圾值與 0 會讓 podman-compose 靜默不下 --cpus（＝無限制）；pids 的 -1/0 則會
+    #    被忠實下達成 unlimited。三個值的失敗模式各不相同。
+    # see docs/design/docker-compose.md「資源／安全限制」、agent-sandbox.md（B0059）
+    mem_limit: ${AGENT_SANDBOX_MEMORY:-2g}   # 預設最多 2 GiB 記憶體（B0059：見 design 檔的推導）
+    cpus: ${AGENT_SANDBOX_CPUS:-2.0}         # 預設最多 2 核心 CPU（CFS quota，非 cpuset：
+                                             # 容器內 nproc 仍顯示 VM 顆數）
+    pids_limit: ${AGENT_SANDBOX_PIDS:-512}   # 預設最多 512 個 task（含執行緒）— 防 fork
+                                             # bomb / 失控 build 吃光 host
 
 volumes:
   # mise 裝的語言／工具持久化於此，跨 session／專案／日共用。

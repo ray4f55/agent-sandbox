@@ -23,12 +23,25 @@ alias 只能塞一行，**無法在 `podman compose run --rm` 結束後接續執
 | `proj_name` | `<compose 目錄 basename>-<YYYYMMDD>`，**淨化** | `COMPOSE_PROJECT_NAME`：按日隔離 + cleanup label 匹配 |
 | `container_name` | `<proj_basename>-<HHMMSS>-<PID>` | 同日同專案多 session 不撞名；`--rm` 後立即釋放此名 |
 
-**淨化規則**：`tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g'`
-（compose project name 規範只收 `[a-z0-9_-]`）。
+**淨化規則**：共用 helper `_agent-sandbox-sanitize-name`——小寫化 +
+`sed 's/[^a-z0-9_-]/-/g'`（compose project name 規範只收
+`[a-z0-9_-]`），**再去掉淨化後殘留在開頭的 `-`／`_`**，結果為空則落
+`workspace` 預設值。去頭這步是 B0051 補的：podman/docker 的 container
+命名規則要求**開頭必須是英數字**（`[a-zA-Z0-9][a-zA-Z0-9_.-]*`），
+若 `$PWD` 是隱藏資料夾（如 `.ssh`）或底線開頭資料夾（如 `_backlog`），
+淨化後開頭會是 `-`／`_`，組出的 `container_name` 不合法、`run` 直接
+被 daemon 拒絕。
+
+→ **紅線**：`proj_basename`／`proj_name` 都必須呼叫這個共用 helper，
+不要各自 inline 一份淨化 pipeline——B0051 的成因正是兩處各自複製了
+同一段邏輯，只有其中一處後來被修過，另一處帶著舊漏洞繼續存在。
 
 **為什麼 `proj_name` 帶日期戳**：見 docker-compose.md 的
 `COMPOSE_PROJECT_NAME` 章節（network/container 按日隔離 + cleanup label
 精準匹配 + 歷史除錯）。
+
+（原追蹤於 B0051，2026-08-19 使用者 `cd` 進 `.ssh` 資料夾當 cwd 啟動時
+發現、確認根因、落地並實機驗證。）
 
 ## Tag 控制與升級（run/build 分家）
 
@@ -77,6 +90,23 @@ Design intents：
 7. **避免 registry 雜訊**：run 在「image 已在」狀態下執行，
    `pull_policy: missing` 既不 build 也不 pull、靜默（此紅線不變，
    見 docker-compose.md）。
+8. **`--upgrade` 建的鏈與 `run` 找的鏈共用同一套變體解析（CLI > 專案
+   `.agent-sandbox` `[image]` 段 > 內建 `claude`），刻意耦合、不是
+   疏漏**：`--upgrade` 表面上感覺像全域維護操作，實際上跟 `run` 走
+   同一段 `_agent-sandbox-apply-image-config`（`agent-sandbox.sh:886`
+   無條件呼叫，不受 `--upgrade` 與否影響），所以會吃 cwd 當下專案的
+   `[image]` 段——換目錄執行 `--upgrade` 可能建到不同鏈。**不能拆開這個
+   耦合**：若 `--upgrade` 忽略專案 `[image]` 段、只建預設 `claude`，
+   帶 `[image] addon = openspec` 的專案會出現「剛升級完，`run` 解析
+   出 `claude-openspec` 鏈卻找不到 image」的更糟情境——`--upgrade`
+   必須建出跟 `run` 會找的**同一條**鏈，兩者不能各自解析。與此相對，
+   `[identity]` 段刻意被排除在 `--upgrade` 外（見「逐專案預設身分」
+   章節）——因為 identity 是純 runtime 概念、跟 build 完全無關，
+   base/addon 則是 build 的對象本身，兩者不對稱是必然，不是不一致。
+   認知負擔的緩解走**可見性**，不走拆耦合：`_agent-sandbox-build-chain`
+   的 `🔄 升級重建` 訊息固定附一行解析依據提醒（不分是否來自 CLI／
+   檔案／預設都印），讓「這個結果因目錄而異」在畫面上可見（原追蹤於
+   B0057，2026-08-21）。
 
 ### 版號：semver 自動配號 + 可指定
 
@@ -177,7 +207,7 @@ volumes 之上、且 `:ro` 生效（實測 mount flag 為 `virtiofs (ro,...)`，
 | 位置 | 角色 | 支援的段 |
 |---|---|---|
 | **工具目錄** `$_AGENT_SANDBOX_DIR/.agent-sandbox` | 全域（關於「你/你的環境」） | `[mount]` |
-| **專案根** `$PWD/.agent-sandbox` | 專案（關於「這個專案需要什麼」） | `[mount]`、`[image]` |
+| **專案根** `$PWD/.agent-sandbox` | 專案（關於「這個專案需要什麼」） | `[mount]`、`[image]`、`[identity]`、`[resource]` |
 
 段的歸屬語意（**不是隨意的不對稱，是 mount/image 本質不同**）：
 
@@ -187,6 +217,12 @@ volumes 之上、且 `:ro` 生效（實測 mount flag 為 `virtiofs (ro,...)`，
   全域預設 base/addon 暫不做（**目前只有 1 base/1 addon，零價值＝YAGNI**；
   前向相容可後加，見 B0016 關聯）。因為只有專案層，關掉只需把該行 `#` 註解掉，
   不需任何旗標 —— 這是它比 mount 簡單的地方。
+- **`[identity]` 專案 only**：「這個專案該用哪個身分」是專案屬性（同 `[image]` 的問法），
+  單值覆蓋。詳見下方「逐專案預設身分」章節（B0049）。
+- **`[resource]` 專案 only**：「這個專案要多少 CPU／記憶體／PID」是專案屬性（「這專案
+  編譯要幾核」），單值覆蓋，預設值來自 `docker-compose.yaml` 的字面 fallback。全域層
+  按 YAGNI 擱置——觸發條件：同一人在 ≥3 個專案重複寫同一組 `[resource]`，或出現明確
+  的機器層需求。詳見下方「逐專案資源限制」章節（B0059）。
 - **git 身分不走設定段**：是 `home/<identity>/.gitconfig` 這個標準 git 檔
   （見下節），不是 `.agent-sandbox` 的某段。**`[git]` 已移除**（早期
   identity-mode 設計棄用）。
@@ -202,7 +238,9 @@ sigil/保留字問題；YAML 要引入 `yq`/python 相依，違反「純 zsh、�
 **合併總則（由型別決定、不可設定）**：
 
 > **清單型（`path`、`addon`）→ 累加**（全域 + 專案 + CLI）；
-> **單值型（`base`）→ 覆蓋**（CLI > 專案 > 內建 claude）。
+> **單值型（`base`、`identity`、`cpus`／`memory`／`pids`）→ 覆蓋**
+> （`base`：CLI > 專案 > 內建 claude；`identity`：CLI > 專案 > 內建 default；
+> 資源三值：專案 > `docker-compose.yaml` 字面 fallback，v1 無 CLI 旗標）。
 
 逃生口：專案 `inherit-global = false`（丟掉全域 mount）、CLI `--no-config-mounts`
 （忽略兩個檔的 mount，只用 `-m`）、`[image]` 那行 `#` 註解（不要該預設）。
@@ -507,6 +545,63 @@ daemon，本來就需要處理命名空間映射，順便做了這個補紀錄�
 
 （原追蹤於 B0044，2026-07-21 落地、實機驗證、三組對照實驗定位觸發源頭。）
 
+## 容器內 SSH client 找錯 `~/.ssh` 路徑（系統層級 ssh_config，B0050）
+
+對應檔：`entrypoint.sh`（`/etc/ssh/ssh_config` 動態產生區塊）、
+`Dockerfile.base.*` 的 `RUN chmod 666 /etc/passwd /etc/group
+/etc/ssh/ssh_config`。
+
+### 問題：上一節「已知環境相依限制」原本沒預料到的具體後果
+
+上一節記載的 podman/macOS 限制（podman 搶先補的 passwd 紀錄 `pw_dir`
+指向 `--workdir` 而非 `$HOME`）原本只評估影響 `whoami`／身分可視化。
+實機驗證發現真正後果更嚴重：**OpenSSH client 對 `~/.ssh/id_*`、
+`~/.ssh/known_hosts`，甚至它自己找 `~/.ssh/config` 這個內建預設行為，
+走的都是 `getpwuid()` 的 `pw_dir`，不是 `$HOME` 環境變數**。`pw_dir`
+錯了，SSH 就會去 `/workspace/<專案>/.ssh/` 找——不只找不到金鑰、退回
+密碼登入，還會把新學到的 host key 意外寫進使用者的專案 workspace
+（實測過寫出 `<專案>/.ssh/known_hosts`）。`gcloud compute ssh` 不受
+影響（Python 的 `~` 展開走 `$HOME` 環境變數，不同機制）。
+
+### 解法：系統層級 `/etc/ssh/ssh_config`，動態掃描身分 `.ssh/` 資料夾
+
+`entrypoint.sh` 每次容器啟動動態產生一段 `Host *`：
+
+- **動態掃描 `${HOME}/.ssh/` 內所有檔案生成 `IdentityFile`**（排除
+  `.pub`／`known_hosts`／`known_hosts2`／`config`／`authorized_keys`），
+  不寫死固定檔名——使用者的金鑰可能自訂命名（不在 SSH 內建那七個
+  預設檔名之列），寫死清單解決不了這個情境。
+- **`Include ${HOME}/.ssh/config`**（僅檔案存在才加）：讓使用者自己
+  在身分資料夾寫的個人化 `Host` 別名設定（`HostName`／`Port`／`User`
+  捷徑）也能在容器內生效——SSH 自己找 `~/.ssh/config` 這個內建行為
+  同樣中招，不能只靠使用者自己建檔就會被讀到。
+- **`UserKnownHostsFile ${HOME}/.ssh/known_hosts ${HOME}/.ssh/known_hosts2`**：
+  修正 host key 學習位置，對應原始症狀（意外寫進專案 workspace）的
+  直接修正。
+
+**為何不修 `/etc/passwd` 的 `pw_dir`（而是繞道系統層級 ssh_config）**：
+上一節已明確決定「podman 補的既有紀錄不覆寫」（未知連鎖風險），本次
+不重新翻案這個決策——`/etc/ssh/ssh_config` 用絕對路徑寫死，完全不經過
+`~` 展開，不管 `pw_dir` 對不對都恆定生效，改動侷限、風險最小。
+
+**寫入權限**：`entrypoint.sh` 以非 root UID 執行，`/etc/ssh/ssh_config`
+預設 root 擁有——沿用上一節同一行 `RUN chmod 666 /etc/passwd
+/etc/group`，一併加上 `/etc/ssh/ssh_config`（同一套已評估過的安全
+論證：`cap_drop: ALL` + `no-new-privileges` 已堵死唯一理論提權路徑）。
+
+**使用者自己 config 檔裡的路徑仍要用絕對路徑**：`Include` 只解決「這
+個檔案找不找得到」，檔案**內容**裡如果寫 `IdentityFile ~/.ssh/xxx`，
+這個 `~` 在被實際使用的當下仍會重新觸發同一個展開機制、同樣找錯地方
+——`Include` 不會連帶修好使用者自己寫的相對路徑，這點無法從系統層級
+根治，只能靠文件／README 提醒。
+
+→ **紅線**：改這段邏輯要保持「不碰 `/etc/passwd`」「動態掃描不寫死
+檔名清單」「系統 ssh_config 用絕對路徑」三個結構性選擇；`gcloud
+compute ssh` 不受這個 bug 影響，不需要這個修法涵蓋它。
+
+（原追蹤於 B0050，2026-08-18 於 B0047 驗證過程發現、確認根因、落地並
+實機驗證。）
+
 ## 身分資料與工具安裝路徑分離（`$AGENT_HOME` / `$AGENT_TOOLS`）
 
 對應檔：兩個 `Dockerfile.base.*` 開頭的 `ARG AGENT_HOME` / `ARG
@@ -731,7 +826,9 @@ fallback 值語意一致（`AGENT_SANDBOX_IDENTITY:-default`）。B0015 落地�
   `.ssh` 沒有理由被特殊對待。`home/default/.ssh` 留空即可，無害。
 - **`.agent-sandbox` 的 `[mount]` / `[image]`**：身分與這兩段完全
   正交——`--identity` 只決定身分資料來源，不影響額外掛載或 base/addon
-  選擇，三者可任意組合。
+  選擇，三者可任意組合。（`[identity]` 段是例外——它本來就是設定
+  identity 用的，見下方「逐專案預設身分」小節，不算違反這條正交性，
+  只是同一個維度換一種輸入方式。）
 
 **檔案型 vs 資料夾型掛載來源都要主動補、不能只補資料夾**（2026-07-24 使用
 者實機測試 `--identity ops` 時發現）：`.claude`／`.codex`／`.config/mise`／
@@ -756,6 +853,395 @@ fail-fast、不自動建立；`--upgrade` 不做身分驗證；身分可視化�
 命名（`--identity`，含 Tab 補全）與容器內路徑固定不變兩項關鍵決策，
 同日開始實作：`home/node/` 更名 `home/default/`、compose 多身分掛載、
 函式 `--identity` 旗標與驗證、Tab 補全、身分可視化 banner/PS1。）
+
+### 逐專案預設身分（`.agent-sandbox` 的 `[identity]` 段，B0049）
+
+B0015 落地當時刻意先不做「`.agent-sandbox` project-level 預設身分」
+（YAGNI——「你是誰」比較像使用者屬性，等真的有反覆手動打 `--identity`
+的痛點再加）。B0047 之後這個痛點真的出現了：`ai-ops` 這類專案本質上
+就是要用固定身分（如 `ops`）管雲端主機，每次手動打 `--identity ops`
+是真實反覆的操作，觸發本項落地。
+
+**獨立 `[identity]` 段，不塞進 `[image]`**：`[image]` 段語意單純只管
+「image 變體」，混進身分會模糊「身分與 image 變體正交」這條既有結論
+（見上方「與既有機制的關係」）。鍵名 `identity =`——跟 CLI 旗標同一個
+詞，不必多記一套對應詞彙；`[identity]` 段只有這一個鍵，用段名當鍵名
+不會有歧義。
+
+**專案 only，比照 `[image]`**：「這個專案該用哪個身分」是專案屬性
+（跟「這個專案要哪個 base」同一種問法），不是使用者全域偏好；全域層
+目前沒有具體需求支撐，開放只會重演 `[image]` 當初「1 base/1 addon、
+零價值＝YAGNI」的同款過度設計，放全域層會被 lint 警告並略過（跟
+`[image]` 同一套「未知/誤放段落」健檢機制）。
+
+**合成規則跟 `base` 完全同構**：單值覆蓋，`--identity` > 檔案
+`identity` > 內建 `default`。落定時機仿照 `base`——`local identity=""`
+一路留空，直到 `_agent-sandbox-apply-identity-config` 這個函式裡才
+真正決定（CLI 有給就用 CLI、否則用檔案值、都沒有才落 `default`），
+不在主函式一開始就提早 `identity="${identity:-default}"`（B0015 原本
+這樣寫，因為那時候還沒有設定檔層；B0049 起這樣寫會讓檔案值永遠贏不了
+提早寫死的 `default`，所以連帶把這行拿掉，改到 apply 函式裡收尾）。
+
+**與 `--upgrade`／`--new-identity` 白名單檢查的耦合（本項最容易踩雷
+的一點）**：`_agent-sandbox-validate-upgrade-flags`／
+`_agent-sandbox-validate-new-identity-flags` 用「`$identity` 是否非空」
+判斷「使用者是否有給 `--identity`」，藉此擋 `--upgrade --identity x`
+這類旗標衝突。這兩個檢查的呼叫時機必須維持在
+`_agent-sandbox-apply-identity-config`（讀 `[identity]` 段、把檔案值
+寫進 `$identity`）**之前**，且 `_agent-sandbox-apply-identity-config`
+本身整段包在 `if [[ -z "$upgrade" ]]` 內，`--upgrade` 模式完全不呼叫
+它——否則單純因為在帶 `[identity]` 段的專案資料夾下跑 `--upgrade`，
+就會被誤判成「有給 --identity」而報錯拒絕，這是實作時故意留設計
+紀錄提醒的坑，別在後續改動時把呼叫順序打亂。
+
+→ **紅線**：`identity` 的落定邏輯必須留在
+`_agent-sandbox-apply-identity-config` 內（不要在主函式提早寫死
+`default`）；`--upgrade`／`--new-identity` 的旗標白名單檢查必須早於
+這個函式呼叫；`[identity]` 維持專案 only，全域層開放前需另外評估
+（同 `[image]` 的 YAGNI 判斷基準）。
+
+（原追蹤於 B0049，2026-08-18 拍板並落地、實機驗證通過。）
+
+## 逐專案資源限制（`.agent-sandbox` 的 `[resource]` 段，B0059）
+
+對應檔：`docker-compose.yaml` 的三個資源欄位、`agent-sandbox.sh` 的
+`_agent-sandbox-apply-resource-config` / `_agent-sandbox-report-resources` /
+`_agent-sandbox-compose-default` 與三個單位換算 helper。
+
+### 動機
+
+`mem_limit` / `cpus` / `pids_limit` 三個值寫死在 repo 內**共用**的
+`docker-compose.yaml`，沒有逐專案覆寫的管道 —— 要放寬只能改共用檔，對所有專案、所有
+使用者一起生效。觸發事件是使用者回報「Podman machine 給了 6 顆，容器卻只跑得動 2 顆，
+是不是有其他限制？」：`cpus` 是 CFS quota 不是 cpuset，容器內 `nproc` 仍顯示 VM 顆數，
+所以「看得到 6 顆、只跑得動 2 顆份」完全不指向設定檔。
+
+### 傳遞管道：環境變數插值（**不是** `compose run` 後綴旗標）
+
+compose 三行值改成 `${AGENT_SANDBOX_MEMORY:-2g}` 這種形式，函式在有覆寫時才傳入對應
+環境變數。插值是本 compose 檔的既有慣例（`image`／`user`／`HOME`／七條身分掛載都是）。
+
+→ **紅線：不要試圖改走「在 `compose run` 後面加資源旗標」**。`docker compose run` 的
+官方選項表**沒有任何資源類旗標**（`-v`／`--cap-add`／`-u`／`-w` 有），而 `podman compose`
+只是把選項原樣轉發給 provider。額外掛載（B0024）之所以能用 `-v`，純粹因為 `-v` 在那張
+表裡 —— **這個先例不可類推到資源限制**。
+
+### 「有值才傳」＋ `env -u`（兩者缺一不可）
+
+```zsh
+local -a res_env=()
+[[ -n "$res_cpus" ]] && res_env+=(AGENT_SANDBOX_CPUS="$res_cpus")
+…
+env -u AGENT_SANDBOX_CPUS -u AGENT_SANDBOX_MEMORY -u AGENT_SANDBOX_PIDS \
+    … "${res_env[@]}" podman compose … run --rm …
+```
+
+- **有值才傳** → 零覆寫時三個變數**根本不存在**，走 compose 的 `:-` unset 分支，行為與
+  引入本機制前逐字相同（`AGENT_SANDBOX_HOME` 是同款先例）。
+  ⚠️ **不可改成「一律傳空字串」**：podman-compose 對空的 `mem_limit` 是 `if mem:` 為假
+  → `-m` 整個不下 ＝ **記憶體限制靜默消失**。同理 `:-` 不可改成 `-`。
+- **`env -u`** → 清掉使用者 shell 裡殘留的 `export AGENT_SANDBOX_CPUS=8`，避免變成跨
+  session 的隱形放寬。這正是本專案當初否決 `CC_EXTRA_MOUNTS` 的理由（見「額外掛載」章
+  「被否決的替代」）。
+- **預設值的唯一真相是 compose 檔的字面值**，zsh 端不得持有第二份（要顯示就用
+  `_agent-sandbox-compose-default` 回頭 `sed` 讀那個檔）。
+
+### 值的驗證：函式端 fail-fast，**不可外包給 provider**
+
+`cpus` 收 `<->(.<->|)`、`memory` 收小寫化後的 `<->[mg]`、`pids` 收 `<->`，**三者都另外
+獨立判定「數值 > 0」**。
+
+→ **紅線：格式比對擋不住 `0`**（`<->` 會 match `0`、`0.0`、`0m`）。少了獨立的數值判定，
+`cpus = 0` 就是一個繞過 docker-compose.md「這幾個欄位不可拿掉」紅線的後門。三個值在
+provider 端的失敗模式**各不相同、不可壓成一句話**：
+
+| 值 | podman-compose | docker-compose（Go） |
+|---|---|---|
+| `cpus` 垃圾值或 `0` | `try_float`→None、`if cpus:` 為假 → **`--cpus` 整個不下＝無限制且靜默**（fail-open） | 載入期 cast 失敗、硬報錯 |
+| `mem_limit` 空字串 | `if mem:` 為假 → `-m` 消失（fail-open） | 同上 |
+| `pids_limit` `-1`／`0` | `is not None` 成立 → **忠實下成 unlimited** | 忠實照做 |
+
+一個 fail-open、一個訊息不指向 `.agent-sandbox`，兩邊都不能倚賴。（本機實測 provider 是
+外部 `/usr/local/bin/docker-compose`。）
+
+`memory` 收窄到小寫單字母是取兩端交集（compose-go 走 `units.RAMInBytes` 較寬、podman
+`-m` 只認 b/k/m/g），順帶讓 `memory = 8`（想寫 8 GiB、收到 8 bytes）fail-fast。
+**刻意不設下限常數**：往下收緊是正當用途（跑不確定安全性第三方 plugin 的 session 反而
+該保守），硬擋會擋掉合法用法。
+
+### 啟動資源資訊：一律印（推翻 B0046 對本區塊的「安靜」紅線）
+
+`_agent-sandbox-report-resources` 在 `📎` 之後、`compose run` 之前印出：本次生效的三個
+上限（覆寫者標 `*`）、machine 容量、其他在跑的 sandbox 逐個的「已用 / 上限」、記憶體與
+CPU 的加總、以及兩條警告。
+
+**為何一律印、連零覆寫也印**：本項的觸發事件正是「限制生效了但使用者查不出來」——這一行
+是**診斷用途**。B0046 的「日常啟動維持安靜」紅線原文即要求此類擴充需「另外評估、明確
+拍板」，2026-09-04 已拍板（原追蹤於 B0046；由 B0059 修改）。
+
+**呈現原則（源自 CPU 可壓縮／記憶體不可壓縮的非對稱）**：
+
+- **記憶體看「實際用量」**，因為上限加總是常態超賣 —— 實測 4 個容器上限加總 16 GiB vs
+  VM 7.72 GiB，而實際只用 2.45 GiB。**上限加總只列出並標示、不據以發警告**（一個在
+  預設配置就會響的警告等於沒有警告）。
+- **CPU 看「額度加總」**，因為瞬時使用率是無意義的快照。
+
+**只有兩條 ⚠️，兩條都是算術事實、結構上不可能誤報**：(a) 單一請求本身就超過 machine
+容量（那個容器永遠拿不到）；(b) 現有實際用量 ＋ 本次上限 > machine（算術上界）。
+兩條一律 ⚠️ **不 ❌**：容器仍起得來，硬擋會把「能跑但慢」變成「不能跑」。
+
+**措辭必須是「已要求」不是「已生效」**：函式在該時點沒有任何證據證明限制真的套上了
+（podman-compose 的 fail-open），印成斷言等於讓可見性紅線的效果變成「讓使用者相信一件
+可能不成立的事」。
+
+→ **紅線**：所有 podman 查詢一律容錯（`2>/dev/null` + 拿不到就少印一段），**絕不阻斷
+啟動** —— 資訊功能不該變成新的失敗模式。守衛範圍要精準：`podman stats` 失敗只該少掉
+依賴它的兩塊，不可連帶吞掉純算術的警告。
+
+**列舉其他 sandbox 用既有 label，不新增專屬 label**：`com.docker.compose.service=agent`
+是 compose 依服務名自動貼的，實測抓得準；再比對 `com.docker.compose.project` 是否為工具
+目錄 basename 開頭，擋掉別的專案剛好也叫 `agent` 的服務。
+
+⚠️ **單位陷阱**：`podman stats` 用**十進位** GB（4 GiB 顯示為 `4.295GB`），compose 的 `4g`
+是 GiB → 一律先轉 bytes 再統一以 GiB 呈現。
+
+### v1 刻意不做
+
+- **CLI 旗標**（`--cpus` 等）：觸發情境是持久性專案屬性、不是 per-session 需求（同 B0049
+  等到痛點真的反覆出現才落地）。逃生口＝把那行 `#` 註解掉，同 `[image]` 的 `addon`。
+  → **前向陷阱**：日後補旗標時，兩張 validator 的 rejected 清單要同步加項，且呼叫順序
+  必須維持在 `_agent-sandbox-apply-resource-config` **之前**，否則在帶 `[resource]` 段的
+  專案跑 `--upgrade` 會被誤判成「有給旗標」而報錯（B0049 那個坑的完整重演）。
+- **全域層 `[resource]`**：YAGNI。⚠️ 誠實記錄的缺口：本項的觸發事件其實是**機器層**
+  抱怨，落地後「這台機器所有 sandbox 都放寬」仍沒有被認可的路徑。
+- **獨立的資源資訊指令**、**跨容器加總的警告**、**數值上限硬擋**、**entrypoint 內回報
+  cgroup 實際生效值**（後者範圍其實更大、受益者是所有人，應另立項）。
+
+（原追蹤於 B0059，2026-09-04 定案並落地；關卡 B（零設定不變性）實機驗證通過：無
+`[resource]` 段時 cgroup 三值與改動前逐字相同。記憶體預設同日由 4g 調降為 2g，理由與
+推導見 `docs/design/docker-compose.md`「資源／安全限制」。）
+
+## 建立新身分（`--new-identity`，B0046）
+
+對應檔：`agent-sandbox.sh` 的 `_agent-sandbox-validate-new-identity-flags`
+/ `_agent-sandbox-create-identity` / 重構後接受參數的
+`_agent-sandbox-ensure-prereqs` / `_agent-sandbox-ensure-gitconfig`。
+
+### 動機
+
+`--identity` 的 fail-fast 紅線（見上節）要求身分頂層資料夾
+`home/<name>/` 必須先手動 `mkdir -p` 才能用——這個手動步驟本身沒有被
+自動化過，是刻意設計（防打錯字時默默落入未預期的空白身分）。但這也代表
+「建立一個全新身分」永遠要手動一行指令，2026-07-28 使用者提出：想要
+連這個 `mkdir` 都省掉，但不透過修改 `--identity` 本身的 fail-fast 行為，
+而是「透過一個獨立的指令或參數處理」。
+
+### 設計：獨立動作型旗標，比 `--upgrade` 分岔得更早
+
+`--new-identity <name>` 是跟 `--upgrade` 同一類「動作型、做完就結束、
+不進容器」的旗標，但分岔位置更早——`--upgrade` 還需要跑
+`_agent-sandbox-validate-variant` 才知道要 build 哪條 base/addon 鏈；
+`--new-identity` 完全不需要，身分與 image 變體是正交的兩件事（見上節
+「與既有機制的關係」）。主函式流程裡，`--new-identity` 在
+`_agent-sandbox-parse-args` 之後、`identity="${identity:-default}"`
+**落定之前**就整個分岔掉，不進入後續 identity/base/addon/mount/build
+主線：
+
+```zsh
+_agent-sandbox-validate-upgrade-flags || return 1
+_agent-sandbox-validate-new-identity-flags || return 1
+if [[ -n "$new_identity" ]]; then
+    _agent-sandbox-create-identity "$new_identity"
+    return $?
+fi
+identity="${identity:-default}"
+...（原本主線繼續）
+```
+
+**旗標白名單**（比照 `_agent-sandbox-validate-upgrade-flags` 同一套
+紀律）：`--new-identity` 不接受 `--identity`（語意衝突：到底要建新的
+還是選舊的）、`--upgrade`（兩者都是「做完就結束」，同時給沒有意義）、
+`--launch`、`-m`／`--mount`／`--no-config-mounts`、`--base`／`--addon`
+——一律 fail-fast 直接報錯，不靜默忽略，跟這個專案一貫「打錯字/給錯
+旗標不該默默發生」的立場一致。
+
+### 身分已存在時：照跑一次、當健檢，不拒絕
+
+**捨棄了跟 `--upgrade` 版號快照「已存在就拒絕覆蓋」對稱的做法**。重新
+檢視後發現這個類比不成立：`--upgrade` 擋覆蓋是因為真的會摧毀東西
+（舊版號 tag 被蓋掉、rollback 能力消失）；`--new-identity` 底層操作
+（`mkdir -p`／touch-if-missing／`.gitconfig` seed-if-missing）本質上就是
+「檢查缺什麼補什麼」，不管跑幾次都不會動到已存在的內容，選項 B（拒絕）
+擋的是不存在的風險，只是表面上長得像。`--identity` fail-fast 紅線真正
+要防的是「靜默」與「意外落入非預期狀態」——只要把每一步做了什麼明確
+印出來（見下節），選項 A（照跑）就沒有踩到那條紅線的精神，還多換到一個
+實用的副作用：身分裡某個子項如果因故被刪掉或壞掉（例如曾經真的發生過的
+`.claude.json` 被 podman 誤建成資料夾，見上節），重跑一次
+`--new-identity` 就能自動修復。
+
+### 逐項可見性：不管有沒有變動，六個子項都要明確列出
+
+使用者明確要求：「不管是已存在還是補了什麼，全都要顯示出來，不可以
+默默在背後做掉」。落地方式：`_agent-sandbox-ensure-prereqs` 與
+`_agent-sandbox-ensure-gitconfig` 重構成接受兩個參數
+（`target_identity`、`verbose`），對 `.claude`／`.codex`／
+`.config/mise`／`.ssh`／`.claude.json`／`.gitconfig` 六個子項逐一在
+動手前判斷存在與否、動手後依實際結果（成功才印「🆕 已建立」，不能
+無條件宣稱）分類回報：
+
+```
+🔍 檢查身分 home/ops/：
+   .claude       已存在，未變動
+   .codex        已存在，未變動
+   .config/mise  已存在，未變動
+   .ssh          🆕 已建立
+   .claude.json  已存在，未變動
+   .gitconfig    已存在，未變動
+✅ 身分 ops 已就緒。下一步：agent-sandbox --identity ops
+```
+
+**回報必須基於操作的真實結果，不能樂觀假設成功**：`mkdir -p`／`touch`／
+寫入 `.gitconfig` 都先判斷實際回傳值，失敗就印 `❌` 並 `return 1`，不會
+在操作失敗的情況下還印出「🆕 已建立」——印一個錯誤的成功訊息比什麼都
+不印更誤導，這正是使用者「不可默默做掉」要求的真正精神（見「行為設計」
+的完整討論脈絡於 backlog）。
+
+**範圍界定：只有 `--new-identity` 走逐項回報，日常啟動維持安靜**。
+> ⚠️ 2026-09-04 由 B0059 部分修改：日常啟動路徑現在會**一律印出一行資源限制摘要**
+> （及 machine 容量／其他 sandbox 用量）。那是本段所要求的「另外評估、明確拍板」之
+> 結果，理由見「逐專案資源限制」章節；`--new-identity` 的逐項回報範圍不變。
+`ensure-prereqs`／`ensure-gitconfig` 是共用同一份邏輯（`verbose` 參數
+控制輸出多寡），但日常啟動路徑（`agent-sandbox --identity <name>`）
+呼叫時明確傳 `verbose=0`——那條路徑的既有紅線是「零互動、秒起」，99%
+情況下這個檢查完全無事可做，若也逐項印 6 行會變成每次日常啟動都多出
+雜訊，跟現有「只有真的有東西要秀才印」的安靜風格（額外掛載清單、
+`[image]` 段讀取摘要都是這樣）不一致。**若日後想把逐項回報也套用到
+日常啟動路徑，需要另外評估、明確拍板，不是本項自動涵蓋的範圍**。
+
+→ **紅線**：`--new-identity` 一律 fail-fast 對待不相干旗標；
+`ensure-prereqs`／`ensure-gitconfig` 的 verbose 輸出必須基於操作真實
+成功與否，不能樂觀假設；日常啟動路徑的安靜行為不受本項影響，除非另有
+明確決策。
+
+（原追蹤於 B0046，2026-07-28 從 intake「多身份 home 目錄不用手動 mkdir」
+分析出發，查證後發現 `.ssh` 等子目錄早已由既有 `ensure-prereqs` 自動
+補齊、真正缺的只有頂層資料夾這層，據此設計獨立指令，不牴觸
+`--identity` 本身的 fail-fast 紅線；同日拍板命名、行為與可見性細節、
+落地實作。）
+
+## gcloud addon + 身分掛載清單擴充（B0047）
+
+對應檔：`Dockerfile.addon.gcloud`、`docker-compose.yaml` 的
+`.config/gcloud` 掛載、`agent-sandbox.sh` 的 `_agent-sandbox-ensure-prereqs`
+子目錄清單。
+
+### 動機
+
+`--identity ops` 這類雲端主機維運身分，除了 SSH 金鑰還會用到 `gcloud`
+CLI 連 GCP。`gcloud` 跟身分是正交的兩件事（見「與既有機制的關係」），
+所以走既有 `--base`/`--addon` 機制新增一個 addon，不是身分機制的一部分
+——這點跟 B0046 的判斷（`--new-identity` 不碰 `--base`/`--addon`）同一
+個道理。
+
+### 安裝方式：官方 apt repo，不走 mise
+
+`Dockerfile.addon.gcloud` 用 Google 官方文件記載的 Debian/Ubuntu apt repo
+安裝法（`packages.cloud.google.com/apt` + `gpg --dearmor` 到
+`/usr/share/keyrings/`，取代已棄用的 `apt-key add`）。**不走 mise**：
+mise 生態圈沒有穩定通用的 gcloud plugin，而 gcloud 本身不是「語言環境」
+（`docs/design/mise.md`「image 不預裝任何語言」那條紅線管的是 Python／
+Go 這類語言 runtime，gcloud 是獨立 CLI 工具，跟 codex/openspec 走
+apt/npm 官方管道是同一類）。裝「當下最新」（保鮮哲學同 claude/codex/
+openspec），版本固化進 `/etc/gcloud-version`，跟其他工具的版本記錄機制
+對齊。
+
+### 登入態持久化：身分掛載清單擴充成七項
+
+`gcloud auth login` 的 OAuth token／application-default credentials
+存在 `$HOME/.config/gcloud/`。跟 `.claude`／`.codex` 同一套「拋棄式容器、
+登入態不拋棄」待遇——`docker-compose.yaml` 新增
+`home/<identity>/.config/gcloud` 掛載，`_agent-sandbox-ensure-prereqs`
+的子目錄清單從六項（`.claude`／`.codex`／`.config/mise`／`.ssh`／
+`.claude.json`／`.gitconfig`）擴充成七項（加 `.config/gcloud`）。
+
+**對沒裝 `gcloud` addon 的身分／base 無害**：跟 `.codex` 全掛的邏輯一樣
+（B0016 方案 A）——沒裝 gcloud 的容器裡這就是一個空資料夾，不影響任何
+東西；換掉的代價只是身分資料夾多一個子目錄，跟現有六項一起靠
+`ensure-prereqs` 冪等維護，機制上零額外成本。
+
+→ **紅線**：新增任何會被身分掛載、需要持久化登入態的工具時，走同一套
+「加進 `docker-compose.yaml` 掛載清單 + `ensure-prereqs` 子目錄清單」
+模式，不要為單一工具另開特例機制。
+
+（原追蹤於 B0047，2026-08-18 使用者提出 `ops` 身分要管理雲端主機的
+實際需求，當場拍板走 addon 機制 + 持久化登入態；gcloud 實際登入流程
+（OAuth device code vs service account）留待建完 addon、實測連線時再
+細談，不在本項範圍內先假設。）
+
+## Office 文件處理 addon + base 的通用文件能力（B0058）
+
+對應檔：`Dockerfile.addon.office`、兩個 `Dockerfile.base.*` 的第一段 apt
+清單、`.github/workflows/build-images.yml` 的 addon matrix。
+
+### 動機與前提：容器內沒有 sudo，是紅線不是漏配
+
+需求是「agent 要能讀使用者的文件」，實務上撞到的是舊版 Office
+（`.doc`／`.xls`／`.ppt`）跟掃描件。工具鏈建議往往長成一行
+`sudo apt-get install …`——**這在本專案的容器內永遠不會成功，也不該想辦法
+讓它成功**：`cap_drop: [ALL]` + `no-new-privileges:true` + 非 root UID 是
+`docs/design/docker-compose.md`「資源／安全限制」的既有紅線。裝系統套件的
+唯一正規路徑是寫進 Dockerfile → `agent-sandbox --upgrade` 重建。
+
+### 分層依據：格式無關的通用能力 vs Office 專用（不是單純按體積切）
+
+| 落點 | 套件 | 粗估 |
+|---|---|---|
+| **兩個 base** | `poppler-utils`、`unar` | ~8 MB |
+| **`office` addon** | `libreoffice-{writer,calc,impress,draw}`、`fonts-noto-cjk`、`fonts-arphic-uming`、`antiword`、`catdoc`、`tesseract-ocr`、`tesseract-ocr-chi-tra` | ~1 GB+ |
+
+`pdftotext`／`unar` 是**跟文件格式無關的基礎能力**（幾乎每個專案遲早都會
+用到、加起來 8 MB），跟 B0056 加 `rsync`、後續加 `vim` 是同一個判斷等級 ——
+進 base。LibreOffice 那一整組是**Office 文件處理專用**且 1 GB+，全塞進 base
+會讓每個 session／每個身分都揹著，並在每次 `--upgrade`（`--no-cache` 整鏈
+重建）與 CI 重複付費 —— 這正是 addon 機制存在的理由。
+
+**`antiword`／`catdoc` 雖然只有 1 MB 也歸 addon**：它們是舊 Office 專用，
+且**對繁中常亂碼**（antiword 為西文設計、catdoc 的編碼參數也不完美）。放進
+base 會給人「base 就能讀 `.doc`」的錯覺，實際踩到亂碼；繁中舊 Office 可靠
+的路是 LibreOffice headless `--convert-to`，跟它綁同一層才誠實。它們在
+addon 內的定位是「不想啟動 LibreOffice 時的快速抽文字路徑」。
+
+### 幾個刻意的選擇
+
+- **走 addon 機制、不走 mise**：同 B0047（gcloud）的判斷——`docs/design/mise.md`
+  「不預裝任何語言」管的是語言 runtime，LibreOffice／tesseract 是獨立 CLI
+  工具，mise 生態圈也沒有穩定 plugin。
+- **CJK 字型是必要配套、不是選配**：缺了 `fonts-noto-cjk`，LibreOffice 轉
+  PDF／圖片時中文會變成豆腐方塊。要瘦身時不要先砍這個。
+- **刻意不加 `--no-install-recommends`**：Recommends 裡可能含轉檔 filter／
+  字型，砍掉的風險是某些格式轉出來壞掉。本項出發點是「急著要能讀」，先求
+  可用；瘦身（約可省 200 MB 的 JRE）留待日後真的嫌大再單獨評估——同
+  `ci-ghcr.md`「之後真的變成瓶頸再降規格，不預先優化」的立場。
+- **版本記錄用 `dpkg-query` 而非 `soffice --version`**：後者要在 build 期
+  啟動一次 headless LibreOffice（CI 的 QEMU 跨架構模擬下特別慢、多一個
+  失敗點），查套件版本本來就是 dpkg 的工作，`/etc/office-tools-version`
+  一樣可追溯，與 openspec／gcloud 的版本記錄慣例對齊。
+- **CI matrix 兩筆是本項最主要的持續成本**：`claude×office`、`codex×office`
+  都是 1 GB+ 的雙架構 QEMU build。日後嫌慢先降這兩筆的規格（例如只留
+  amd64），不要動其他既有變體。
+
+### 使用面：`-env:UserInstallation` 不是裝飾
+
+LibreOffice headless 併發轉檔會搶同一份 user profile 而互相卡住，每個呼叫
+要各自給獨立路徑（`-env:UserInstallation=file:///tmp/lo_$$`）。`$HOME`
+（`$AGENT_HOME`，world-writable）可寫，profile 本身不是問題。用法範例見
+README「用 office」段。
+
+→ **紅線**：新增文件處理工具時照這條分界線落層——**格式無關的通用能力**才
+進 base，**特定文件格式專用**（尤其體積大的）一律進 addon；新增 addon 記得
+同步 CI 的顯式 matrix（本機靠 glob 自動發現，CI 不會）。
+
+（原追蹤於 B0058，2026-08-30。）
 
 ## Tab 補全（`_agent-sandbox` + `compdef`）
 
@@ -870,6 +1356,10 @@ run 不起來。→ **改補全的 tag 來源時保持「補得到＝跑得起�
 - `agent-sandbox-claude-openspec:latest` —— `--base claude --addon openspec`
 - `agent-sandbox-codex:latest` —— `--base codex`（B0016 起內建第二 base）
 - `agent-sandbox-codex-openspec:latest` —— `--base codex --addon openspec`
+- `agent-sandbox-claude-gcloud:latest` —— `--base claude --addon gcloud`
+  （B0047，官方 Google Cloud CLI，供雲端主機維運身分使用）
+- `agent-sandbox-claude-office:latest` —— `--base claude --addon office`
+  （B0058，LibreOffice＋CJK 字型＋OCR，讓 agent 讀得懂舊版 Office／掃描件）
 
 ### 逐專案預設 base/addon（專案 `.agent-sandbox` 的 `[image]` 段）
 
