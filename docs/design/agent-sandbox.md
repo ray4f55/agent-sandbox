@@ -1243,6 +1243,73 @@ README「用 office」段。
 
 （原追蹤於 B0058，2026-08-30。）
 
+## 進入已在跑的 sandbox（`--enter`，B0055）
+
+對應檔：`agent-sandbox.sh` 的 `_agent-sandbox-validate-enter-flags` /
+`_agent-sandbox-enter` / 補全 tags state 的 `--enter` 分支。
+
+### 動機
+
+同一個容器被多個終端機同時使用（一窗跑 agent、一窗手動下指令觀察／
+除錯）。現況的「多終端機」是多個各自獨立的容器；要的是 `podman exec`
+那種附加語意，但容器名帶 `<HHMMSS>-<PID>` 記不住、也沒有列表指令，
+手動 exec 摩擦大。
+
+### 設計：exec 附加（guest 語意），容器生命週期完全不動
+
+`--enter` 是第三個「動作型」旗標（`--upgrade`／`--new-identity` 家族，
+同一套白名單 fail-fast 紀律）。分岔位置在 `compose_dir` 落定之後、
+lint/image/identity/mount/resource/build 主線之前——比 `--new-identity`
+晚一步分岔，只因需要 `compose_dir` 推導專案名。
+
+- **發現**：`com.docker.compose.service=agent` label ＋ project 前綴
+  雙重比對（同 B0059 資源報表的過濾邏輯），再按容器名前綴
+  `<proj_basename>-` 分「本專案」／「其他」。容器名不帶日期 → 跨午夜
+  仍找得到昨日起的容器。
+- **0／1／多分支**：恰一個直接 `podman exec -it <name> bash`；多個
+  fail-fast 列清單（附可直接複製的完整指令）；零個報錯並列出其他專案
+  在跑的（`--enter <容器名>` 可跨專案指定）。**不做互動選單**——與
+  全專案零互動紀律一致。
+- **guest 語意**：主 session 退出 → `--rm` 消滅容器 → guest 被踢。
+  exec 不產生新容器，退出清理的 `podman ps` 計數天然不受影響，
+  cleanup 邏輯零改動；enter 當下印一行提醒＋README 載明。
+- **位置參數依模式變義**第三例：run＝image tag、upgrade＝要建的版號、
+  enter＝容器名。
+- **白名單**：拒收 `--upgrade`／`--new-identity`／`--identity`／`-m`／
+  `--no-config-mounts`／`--base`／`--addon`／`--launch`（目標容器的
+  這些屬性在啟動當下已固定，exec 附加全部無意義）。與另兩個動作型
+  旗標的互斥由本 validator 單向負責（同 validate-new-identity-flags
+  擋 `--upgrade` 的既有慣例）；呼叫順序必須早於
+  `_agent-sandbox-apply-identity-config`／`apply-resource-config`
+  （B0049／B0059 同一個坑：否則帶 `[identity]`／`[resource]` 段的專案
+  跑 `--enter` 會被誤判成有給旗標）。
+- **Tab 補全**：`--enter` 在場時位置參數候選改列在跑的容器名
+  （`podman ps` label 過濾即時發現），不列 image tag——enter 不起新
+  容器，tag 對它無意義。
+
+### 被否決的替代
+
+- **長駐容器模型**（`up -d` ＋ 人人 exec）：推翻「拋棄式容器 + `--rm`
+  + 退出清理」整組紅線，還得發明「誰負責關容器」；其資源優點（N 個
+  終端機共用一份上限）exec 附加同樣拿得到，不值得付生命週期重設計的
+  代價。
+- **純文件教 raw `podman exec`**：能力已存在但摩擦沒消除（容器名帶
+  PID、label 過濾指令長），文件解法只是把摩擦寫下來。
+
+### v1 刻意不做
+
+- **`--launch` 搭配**（附加後自動起工具）：進去自己打即可，痛點真實
+  反覆出現再加（同 B0049 的落地標準）。
+- **獨立 `--list` 指令**：失敗路徑印的清單本身就是列表功能，B0059
+  啟動資源報表也已列出其他在跑的 sandbox。
+
+→ **紅線**：`--enter` 一律 exec 附加、不得改變既有容器生命週期／清理
+邏輯；多容器 fail-fast 不互動；entrypoint 的修改都是落在容器檔案系統
+的持久修改（passwd 補記錄、ssh_config 生成），主 session 啟動時已做完、
+guest 自動受益——不需要（也不要）為 exec 重跑 entrypoint。
+
+（原追蹤於 B0055，2026-09-07 拍板方案與命名、落地。）
+
 ## Tab 補全（`_agent-sandbox` + `compdef`）
 
 **用 `_arguments` 宣告式狀態機**（非 `case $words[CURRENT-1]` 的弱位置感）：

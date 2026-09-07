@@ -22,6 +22,8 @@
 #                   報錯不自動建）。容器內身分路徑固定，只換 host 端來源。B0015
 #   --new-identity → 建立新身分骨架（home/<name>/...），純建立動作、不進容器、
 #                   不接受其他旗標；已存在也可執行，逐項回報狀態，冪等不覆蓋。B0046
+#   --enter       → 附加進已在跑的 sandbox 容器（同一容器多終端機同時用；guest
+#                   session，主 session 退出時容器消失、連線一併中斷）。B0055
 #   設定檔        → .agent-sandbox（key = value）：專案根放 [mount]/[image]/[identity]，
 #                   工具目錄放全域 [mount]；容器 git 身分改編 home/<identity>/.gitconfig
 #   tab 可補完本地 image tag、Dockerfile.{base,addon}.*、home/<identity> 候選
@@ -57,7 +59,7 @@ _AGENT_SANDBOX_COMPOSE="$_AGENT_SANDBOX_DIR/docker-compose.yaml"
 
 # --- 參數解析 ---
 # 讀：$@／寫：image_tag base addons cli_mounts no_config_mounts launch upgrade
-#             new_identity
+#             new_identity enter
 # -h 印完 usage 後回傳 200（≠0 但非錯誤），主函式據此 return 0。
 _agent-sandbox-parse-args() {
     while (( $# )); do
@@ -76,6 +78,8 @@ _agent-sandbox-parse-args() {
             --new-identity)
                 [[ -z "$2" || "$2" == -* ]] && { echo "❌ --new-identity 需要值" >&2; return 1; }
                 new_identity="$2"; shift 2 ;;
+            --enter)
+                enter=1; shift ;;
             -m|--mount)
                 [[ -z "$2" ]] && { echo "❌ $1 需要值（<host>[:<container>][:ro]）" >&2; return 1; }
                 cli_mounts+=("$2"); shift 2 ;;
@@ -87,6 +91,7 @@ _agent-sandbox-parse-args() {
                 cat <<'USAGE'
 用法: agent-sandbox [tag] [--upgrade] [--base <name>] [--addon <name>]... [-m <spec>]... [--identity <name>] [--launch]
        agent-sandbox --new-identity <name>
+       agent-sandbox --enter [容器名]
 
   tag                  image tag（位置參數，預設 latest）。
                          純啟動模式：要跑哪個 tag —— 存在就跑、不存在報錯，
@@ -127,6 +132,16 @@ _agent-sandbox-parse-args() {
                        補上」，天生冪等——可當健檢重跑，不會覆蓋既有內容。
                        建完照常 agent-sandbox --identity <name> 啟動。
                        see docs/design/agent-sandbox.md「B0046」
+  --enter [容器名]     附加進一個已在跑的 sandbox 容器（podman exec 開新
+                       bash），讓同一容器被多個終端機同時使用（一窗跑
+                       agent、一窗觀察除錯）。不指定容器名 → 自動找本專案
+                       在跑的 sandbox：恰一個直接進；多個列清單要求指定；
+                       零個報錯（並列出其他專案在跑的，可跨專案指定）。
+                       附加的是 guest session：起容器的主 session 退出時
+                       容器即消失（--rm）、guest 連線一併中斷。純附加動作，
+                       不接受其他旗標（--identity/--base/--addon/-m/
+                       --launch 等一律報錯）。tab 可補在跑的容器名。
+                       see docs/design/agent-sandbox.md「B0055」
   --launch             進容器後自動啟動該 base 宣告的工具（claude base → claude），
                        工具退出後留在容器 bash 可續作業。base 須在其 Dockerfile
                        宣告 LABEL agent-sandbox.launch=<tool>，否則報錯。
@@ -199,6 +214,34 @@ _agent-sandbox-validate-new-identity-flags() {
     (( ${#addons[@]} > 0 )) && rejected+=("--addon")
     if (( ${#rejected[@]} > 0 )); then
         echo "❌ --new-identity 只接受身分名稱本身，是純建立動作；不支援：${(j:、:)rejected}" >&2
+        return 1
+    fi
+}
+
+# --- 驗證 --enter 旗標白名單：附加進既有容器，純 exec 動作 ---
+# 讀：enter upgrade new_identity identity launch no_config_mounts cli_mounts
+#     base addons（皆主函式 local）
+# 紅線：--enter 是第三個「動作型」旗標（同 --upgrade/--new-identity 的
+# fail-fast 紀律）——目標容器的身分/base/addon/mount/資源在它啟動當下就
+# 固定了，這些旗標對 exec 附加全部無意義，一律報錯不靜默忽略。與另兩個
+# 動作型旗標的互斥由本檢查單向負責（同 validate-new-identity-flags 擋
+# --upgrade、而 validate-upgrade-flags 不回頭認識它的既有慣例）。必須在
+# _agent-sandbox-apply-identity-config 之前呼叫（同上方兩個 validator 的
+# 順序要求：只擋 CLI 給的值，不能被 [identity]/[resource] 檔案值誤觸發）。
+# see docs/design/agent-sandbox.md「B0055」
+_agent-sandbox-validate-enter-flags() {
+    [[ -n "$enter" ]] || return 0
+    local -a rejected=()
+    [[ -n "$upgrade" ]] && rejected+=("--upgrade")
+    [[ -n "$new_identity" ]] && rejected+=("--new-identity")
+    [[ -n "$identity" ]] && rejected+=("--identity")
+    [[ -n "$launch" ]] && rejected+=("--launch")
+    (( ${#cli_mounts[@]} > 0 )) && rejected+=("-m/--mount")
+    [[ -n "$no_config_mounts" ]] && rejected+=("--no-config-mounts")
+    [[ -n "$base" ]] && rejected+=("--base")
+    (( ${#addons[@]} > 0 )) && rejected+=("--addon")
+    if (( ${#rejected[@]} > 0 )); then
+        echo "❌ --enter 只接受目標容器名（附加進已在跑的容器，其身分/變體/掛載在啟動當下已固定）；不支援：${(j:、:)rejected}" >&2
         return 1
     fi
 }
@@ -891,6 +934,60 @@ _agent-sandbox-create-identity() {
     fi
 }
 
+# --- --enter：附加進已在跑的 sandbox（發現 + podman exec；不起新容器）---
+# 讀：compose_dir／參數：$1=目標容器名（空＝自動發現）
+# 附加的是 guest session：容器生命週期仍由起它的主 session 持有（--rm 在
+# 主 session 退出時生效，guest 連線一併被中斷）——exec 不產生新容器，退出
+# 清理的 podman ps 容器計數天然不受影響，cleanup 邏輯完全不用動。發現用
+# 既有 label 雙重比對（service=agent ＋ project 前綴，同 report-resources
+# 的過濾邏輯），再按 container 名前綴 <proj_basename>- 分「本專案」與
+# 「其他」；容器名不帶日期 → 跨午夜仍找得到昨日起的容器。多個命中一律
+# fail-fast 列清單（零互動紀律），不做互動選單。
+# see docs/design/agent-sandbox.md「B0055」
+_agent-sandbox-enter() {
+    local target="$1"
+    local proj_basename tool_prefix
+    proj_basename="$(_agent-sandbox-sanitize-name "$(basename "$PWD")")"
+    tool_prefix="$(_agent-sandbox-sanitize-name "$(basename "$compose_dir")")-"
+
+    local ps_out line nm proj c
+    local -a mine=() others=()
+    ps_out="$(podman ps --filter "label=com.docker.compose.service=agent" \
+        --format '{{.Names}}|{{index .Labels "com.docker.compose.project"}}' 2>/dev/null)"
+    for line in ${(f)ps_out}; do
+        [[ -n "$line" ]] || continue
+        nm="${line%%|*}"; proj="${line#*|}"
+        [[ "$proj" == "$tool_prefix"* ]] || continue
+        if [[ "$nm" == "${proj_basename}-"* ]]; then mine+=("$nm"); else others+=("$nm"); fi
+    done
+
+    if [[ -z "$target" ]]; then
+        if (( ${#mine[@]} == 0 )); then
+            echo "❌ 本專案（$proj_basename）目前沒有在跑的 sandbox。先起一個：agent-sandbox" >&2
+            if (( ${#others[@]} > 0 )); then
+                echo "   其他在跑的 sandbox（可 agent-sandbox --enter <容器名> 跨專案附加）：" >&2
+                for c in "${others[@]}"; do echo "     $c" >&2; done
+            fi
+            return 1
+        elif (( ${#mine[@]} > 1 )); then
+            echo "❌ 本專案有 ${#mine[@]} 個 sandbox 在跑，請指定要進哪個：" >&2
+            for c in "${mine[@]}"; do echo "   agent-sandbox --enter $c" >&2; done
+            return 1
+        fi
+        target="${mine[1]}"
+    elif ! podman container exists "$target" 2>/dev/null; then
+        echo "❌ 找不到容器：$target" >&2
+        if (( ${#mine[@]} + ${#others[@]} > 0 )); then
+            echo "   目前在跑的 sandbox：" >&2
+            for c in "${mine[@]}" "${others[@]}"; do echo "     $c" >&2; done
+        fi
+        return 1
+    fi
+
+    echo "🔗 附加進 $target（guest session：主 session 退出時容器即消失，本連線一併中斷）"
+    podman exec -it "$target" bash
+}
+
 # --- Build 鏈（雙模）：run 永不 build；--upgrade 是唯一 build 入口 ---
 # 讀：upgrade base base_df image_tag addons compose_dir image_name
 # 寫：prev_image（純啟動模式；最終 image，供 --launch inspect 與 run）
@@ -1063,6 +1160,7 @@ agent-sandbox() {
     local identity=""                 # 空=CLI 未指定；與專案 [identity] 段合成後落定
                                        # （皆無 → default，B0015；B0049 起可來自設定檔）
     local new_identity=""             # --new-identity：建立身分骨架，純動作、不進容器（B0046）
+    local enter=""                    # --enter：附加進已在跑的 sandbox，純 exec 動作（B0055）
     local launch=""                   # --launch：進容器自動啟動該 base 宣告的工具
     local upgrade=""                  # --upgrade：唯一 build 入口（run 永不 build）
     local no_config_mounts=""         # --no-config-mounts：本次忽略設定檔 mount
@@ -1081,6 +1179,7 @@ agent-sandbox() {
     # 皆是「動作型旗標」的白名單，同一種順序要求）
     _agent-sandbox-validate-upgrade-flags || return 1
     _agent-sandbox-validate-new-identity-flags || return 1
+    _agent-sandbox-validate-enter-flags || return 1
 
     # --new-identity 在這裡就分岔掉，完全不進入後續 identity/base/addon/
     # mount/build 主線——比 --upgrade 分岔得更早（--upgrade 好歹要跑
@@ -1093,6 +1192,18 @@ agent-sandbox() {
 
     # compose 目錄＝本檔所在目錄（自我定位，見檔頭）
     local compose_dir="$_AGENT_SANDBOX_DIR"
+
+    # --enter 在這裡分岔（B0055）：附加進已在跑的 sandbox，純 exec、不起新
+    # 容器，完全不進 lint/image/identity/mount/resource/build 主線（比
+    # --new-identity 晚一步分岔只因需要 compose_dir 推導專案名）。位置參數
+    # 在 enter 模式＝目標容器名（run 模式＝image tag、upgrade 模式＝要建的
+    # 版號——「位置參數依模式變義」是既有慣例）。
+    if [[ -n "$enter" ]]; then
+        local enter_target=""
+        [[ "$image_tag" != latest ]] && enter_target="$image_tag"
+        _agent-sandbox-enter "$enter_target"
+        return $?
+    fi
 
     # 設定檔健檢（段落放錯層 / 已移除段）。同檔（從工具目錄自身啟動）只當專案檢，
     # 因為那份檔同時是專案檔、[image]/[identity] 在它裡面是合法的。
@@ -1233,6 +1344,7 @@ _agent-sandbox() {
         '(--no-config-mounts)--no-config-mounts[本次忽略設定檔 mount，只用 -m]' \
         '(--identity)--identity[切換身分資料來源（預設 default）]:identity:->identities' \
         '(--new-identity)--new-identity[建立新身分骨架，純動作不進容器]:new identity name:' \
+        '(--enter)--enter[附加進已在跑的 sandbox 容器（guest，不起新容器）]' \
         '(--launch)--launch[進容器自動啟動該 base 宣告的工具]' \
         '(--upgrade)--upgrade[重建整鏈並更新工具到最新（自動留版號快照；只 build 不進容器）]' \
         '1:image tag:->tags'
@@ -1257,6 +1369,16 @@ _agent-sandbox() {
             done
             _describe 'identity' ids ;;
         tags)
+            # --enter 模式：位置參數＝容器名，候選改列在跑的 sandbox 容器
+            # （不列 image tag——enter 不起新容器，tag 對它無意義）。B0055
+            if (( ${words[(I)--enter]} )); then
+                local -a runnings
+                runnings=(${(f)"$(podman ps \
+                    --filter "label=com.docker.compose.service=agent" \
+                    --format '{{.Names}}' 2>/dev/null)"})
+                _describe 'running sandbox' runnings
+                return
+            fi
             # 依命令列已敲的 --base/--addon ＋ 專案 [image] 段（同 runtime 合成
             # 規則）推導「最終 repo」，只列它的 tag —— 補到的 tag 保證 run 得起來。
             # 寫死 agent-sandbox-claude 會把 base-only 的版號推給帶 addon 的指令。
