@@ -340,6 +340,36 @@ podman build -f Dockerfile.base.claude -t agent-sandbox-claude:latest .
 
 ---
 
+### 同一容器多終端機（`--enter`）
+
+`agent-sandbox --enter` 把目前的終端機**附加**進一個已在跑的 sandbox
+（`podman exec` 開一個新 bash），不另起新容器——典型用法：一個視窗跑
+agent、另一個視窗進同一個容器觀察或除錯。
+
+```
+# 視窗 1：照常啟動
+agent-sandbox
+
+# 視窗 2：附加進去（本專案恰好一個在跑 → 直接進）
+agent-sandbox --enter
+🔗 附加進 myproj-101010-11（guest session：主 session 退出時容器即消失，本連線一併中斷）
+```
+
+行為：
+
+- **不指定容器名**：自動找「目前專案」在跑的 sandbox——恰一個直接進；
+  多個列出清單要求指定（`agent-sandbox --enter <容器名>`，tab 可補在跑
+  的容器名）；零個報錯，並列出其他專案在跑的 sandbox（可跨專案指定）。
+- **guest 語意**：容器生命週期仍由「起它的那個視窗」持有——主 session
+  退出時容器 `--rm` 消失，所有附加中的連線一併中斷（標準 `podman exec`
+  語意）；反過來 guest 打 `exit` 不影響主 session 與容器。
+- 附加的 shell 與主 session **同身分、同掛載、同資源上限**（多個視窗
+  共用同一份 CPU／記憶體額度，重活並行會互相排擠）。
+- 純附加動作：不接受 `--identity`／`--base`／`--addon`／`-m`／`--launch`
+  等旗標（目標容器的這些屬性在啟動當下已固定），給了直接報錯。
+
+---
+
 ### 進階：Base 變體（`--base`）
 
 base 決定容器裡裝哪套 AI 工具。內建：
