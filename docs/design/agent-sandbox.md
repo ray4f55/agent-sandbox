@@ -1131,7 +1131,14 @@ identity="${identity:-default}"
 
 ## gcloud addon + 身分掛載清單擴充（B0047）
 
-對應檔：`Dockerfile.addon.gcloud`、`docker-compose.yaml` 的
+> ⚠️ 2026-09-09 由 B0062 修改：`Dockerfile.addon.gcloud` 已併入用途型的
+> `Dockerfile.addon.ops`（gcloud ＋ Ansible），image 名改為
+> `agent-sandbox-<base>-ops`，`/etc/gcloud-version` 改為逐工具一行的
+> `/etc/ops-tools-version`。本節的安裝方式（官方 apt repo）與登入態持久化
+> 結論不變；合併理由與 Ansible 的取捨見下方「ops addon」章節，既有使用者
+> 遷移見 `docs/guides/migrate-gcloud-to-ops.md`。
+
+對應檔：`Dockerfile.addon.gcloud`（今 `Dockerfile.addon.ops`）、`docker-compose.yaml` 的
 `.config/gcloud` 掛載、`agent-sandbox.sh` 的 `_agent-sandbox-ensure-prereqs`
 子目錄清單。
 
@@ -1162,7 +1169,8 @@ openspec），版本固化進 `/etc/gcloud-version`，跟其他工具的版本�
 登入態不拋棄」待遇——`docker-compose.yaml` 新增
 `home/<identity>/.config/gcloud` 掛載，`_agent-sandbox-ensure-prereqs`
 的子目錄清單從六項（`.claude`／`.codex`／`.config/mise`／`.ssh`／
-`.claude.json`／`.gitconfig`）擴充成七項（加 `.config/gcloud`）。
+`.claude.json`／`.gitconfig`）擴充成七項（加 `.config/gcloud`；B0062 起
+再加 `.ansible` 成八項）。
 
 **對沒裝 `gcloud` addon 的身分／base 無害**：跟 `.codex` 全掛的邏輯一樣
 （B0016 方案 A）——沒裝 gcloud 的容器裡這就是一個空資料夾，不影響任何
@@ -1310,6 +1318,126 @@ guest 自動受益——不需要（也不要）為 exec 重跑 entrypoint。
 
 （原追蹤於 B0055，2026-09-07 拍板方案與命名、落地。）
 
+## ops addon：用途型維運工具箱（gcloud＋Ansible）與 addon 相依規則（B0062）
+
+對應檔：`Dockerfile.addon.ops`（取代 `Dockerfile.addon.gcloud`）、
+`docker-compose.yaml` 的 `.ansible` 掛載、`agent-sandbox.sh` 的
+`_agent-sandbox-ensure-prereqs` 子目錄清單、CI matrix 的 `ops` 兩筆。
+
+### 為什麼合併、不再加一個 `ansible` addon
+
+「一個工具一個 addon」的真正成本不在檔案數：每個 addon × 2 base ＝ 2 筆
+雙架構 QEMU build（CI matrix 從 6 筆變 8 筆）、多一組 image／版號快照要
+管，而且 **CI 只驗證單一 addon 的鏈**——`--addon gcloud --addon ansible`
+疊起來的組合不在 matrix 裡，靠疊層等於沒有 CI 保證。`office`（B0058）
+早已是「文件處理」這個用途的整包；`gcloud` 單一工具只是因為它是 `ops`
+身分第一個需要的東西、不是刻意的分類原則。改成用途型後三個 addon 的
+分類邏輯一致。
+
+命名 `ops` 跟 `--identity ops` 同一個字：身分與 addon **仍然正交**（程式上
+零耦合，見「多身分」章節「與既有機制的關係」），只是語意上「ops 身分配
+ops 工具箱」剛好對齊。
+
+**納入標準**（同時寫在 Dockerfile 開頭，防止變成什麼都往裡丟的垃圾桶）：
+
+> **維運身分從沙盒內連出去管遠端主機用的 client 工具。**
+> 符合：gcloud、Ansible、日後 kubectl／terraform／AWS CLI。
+> 不符合：語言 runtime（走 mise）、專案開發工具（openspec 那類）、文件處理
+> （office）。
+
+### addon 共用相依的規則（本項順帶釐清）
+
+已查證（2026-09-09 直接讀 Google apt repo 的 `Packages` 索引）：
+`google-cloud-cli` deb `Depends: python3 (>= 3.10), python3 (<< 3.15)`——
+gcloud addon 本來就把 Debian 系統 python3（bookworm = 3.11）放上了 PATH。
+
+「重複裝」本身傷害有限：同一條鏈疊層時第二層的 apt 看到已裝就不重裝；分
+兩條鏈各建只是磁碟與 build 時間重複，不是正確性問題。真正要防的是
+**相依衝突**（兩個 addon 對同一套件要不同版本、或從不同 apt repo 拿同名
+套件，錯誤發生在 build 中段且訊息不指向哪個 addon）與 `--upgrade`
+`--no-cache` 整鏈重建時重複付的時間。規則：
+
+- addon 的相依由那個 addon 自己裝、**盡量隔離**（工具專用的直譯器放
+  `$AGENT_TOOLS` 底下、不上 PATH），不依賴「另一個 addon 剛好裝過」。
+- 同一個相依被 ≥ 2 個 addon 需要 → 先問「這兩個 addon 是不是同一個用途」：
+  是 → **合併成用途型 addon**（本項）；否 → 只有**格式無關、非語言
+  runtime** 的通用能力才進 base（B0058 的分界線），語言 runtime 永遠不進
+  base。
+- 系統 python3 出現在 ops 鏈的 PATH 上是 gcloud deb 的**工具內部相依**，
+  不是「base 可以裝語言」的先例（`docs/design/mise.md` 那條紅線的範圍已
+  補述）。
+
+### Ansible 裝法：uv 自帶獨立 Python，刻意不共用 gcloud 的系統 python3
+
+三個選項的取捨：apt `ansible-core` 只有 2.14（2022 年、上游 EOL，新的
+galaxy collection 多要求 core ≥ 2.15／2.16，很快撞牆）；用系統 python 3.11
+裝 pip 版最高只到 2.19（PyPI 最新 2.21 要 Python ≥ 3.12）——那個 pin 是
+**隱形天花板**，正是 B0035 mise glibc 那種「上游抬要求、`--upgrade` 才撞、
+訊息不指向原因」的坑。採 **uv**（astral-sh 的 Python 套件／工具管理器，
+Rust 寫的單一靜態 binary，裝法同 mise 是官方 curl 腳本）：
+`uv tool install --python 3.13 ansible-core`，uv 自己下載預編譯的獨立
+Python（python-build-standalone），amd64／arm64 自動選對（CI 雙架構 build
+不用自己挑 tarball），與系統 python3 完全脫鉤。代價約 +140 MB（uv 40 ＋
+Python 70 ＋ ansible-core 30；對照 gcloud deb 本身約 310 MB、office addon
+1 GB+）。
+
+幾個刻意的選擇：
+
+- **uv 本體不上 PATH**（`UV_UNMANAGED_INSTALL` 裝到 `$AGENT_TOOLS/uv/`，
+  不改 PATH、不裝自我更新）：它只是本層的安裝工具；容器內的 Python 管理
+  入口只有 mise 一個，不製造第二套。
+- **釘 Python minor（3.13）、不釘 patch、也不追「最新 Python」**：新 minor
+  剛發布的前幾個月，cryptography／PyYAML 等相依常沒有對應 wheel，退回原始
+  碼編譯（需要 Rust／gcc）就失敗。拆釘條件寫在 Dockerfile 那行旁邊：uv 報
+  「ansible-core 沒有版本支援 3.13」時往上調一格——訊息明確指向那一行，
+  跟 2.19 天花板的差別就在這裡。
+- **Ansible 的 Python 與 gcloud 的系統 python3 不共用**：共用等於讓 Ansible
+  被 deb 的 `python3 (<< 3.15)` 上限綁住，是「盡量隔離」規則的第一個實例。
+- **`--with requests --with google-auth`**：`google.cloud` collection 的
+  Python 端相依必須裝在 Ansible 的 Python 環境裡（collection 檔案本身由
+  使用者自管，見下）。
+- **`UV_COMPILE_BYTECODE=1`**：venv 在 runtime 是 root 擁有、唯讀，Python
+  無法即時寫 `__pycache__`，build 時先編好。
+- 各環境變數名稱（`UV_UNMANAGED_INSTALL`／`UV_PYTHON_INSTALL_DIR`／
+  `UV_TOOL_DIR`／`UV_TOOL_BIN_DIR`）已對照 uv 官方 installer 原始碼與文件
+  查證——同 mise `MISE_LIBC` 的教訓，上游認什麼變數讀原始碼驗證。
+
+### collections 走身分掛載 `~/.ansible`，不烤進 image
+
+Ansible 本體只帶最基本的 module；`google.cloud`／`community.general` 這些
+collection 要 `ansible-galaxy collection install` 下載，預設落在
+`~/.ansible/collections/`——本沙盒的 `~` 是 `$AGENT_HOME`，不掛就隨容器
+消失。採 B0047 同一套模式：`docker-compose.yaml` 加
+`home/<identity>/.ansible` 掛載、`ensure-prereqs` 子目錄清單擴成八項。
+理由：**不用替使用者決定一份 collection 清單**（品味決定、會漂移）；
+Galaxy／Automation Hub token 若有也一併持久，跟「登入態不拋棄」語意相容。
+曾評估「build 時烤進 image」（每 session 都有、唯讀、`--upgrade` 跟著刷新）
+——image 再肥 50–100 MB 且要維護清單，不採。專案層的 collection 用 Ansible
+原生 `ansible.cfg` 的 `collections_path` 指到 workspace 即可，agent-sandbox
+不另做機制。
+
+**ControlPersist socket 移出掛載**：`~/.ansible/cp/` 是 SSH 連線複用的 unix
+socket 目錄。socket 是 per-session 暫態物，放進持久化資料夾只會在 host 的
+`home/<identity>/.ansible/cp/` 留殘骸；而且 macOS podman machine 的 virtiofs
+共享檔案系統能不能建 unix socket 節點本身不保證（Docker Desktop 舊的
+osxfs／gRPC-FUSE 是出名的 `operation not supported`）。Dockerfile 設
+`ENV ANSIBLE_SSH_CONTROL_PATH_DIR=/tmp/ansible-cp` 一行，兩個問題一起消失，
+不需實測。
+
+### 版本記錄：`/etc/ops-tools-version` 逐工具一行
+
+取代 `/etc/gcloud-version`：gcloud／ansible-core／uv／Ansible 用的 Python
+各一行 ＋ build date。新增工具時多加一行，並同步 CI matrix 註解的粗估體積。
+
+→ **紅線**：`ops` 的納入標準寫在 Dockerfile 開頭，新工具先過那條線再進；
+Ansible 的 Python 與 gcloud 的系統 python3 **不共用**；uv 不上 PATH；
+collection 不烤進 image；socket 目錄不放掛載內。新增 addon 或改動既有 addon
+的相依時先過上方「addon 共用相依的規則」。
+
+（原追蹤於 B0062，2026-09-09 拍板合併、命名 `ops`、uv 裝法、collection 走
+掛載，同日落地。`--addon gcloud` 既有使用者的遷移見
+`docs/guides/migrate-gcloud-to-ops.md`。）
+
 ## Tab 補全（`_agent-sandbox` + `compdef`）
 
 **用 `_arguments` 宣告式狀態機**（非 `case $words[CURRENT-1]` 的弱位置感）：
@@ -1423,8 +1551,9 @@ run 不起來。→ **改補全的 tag 來源時保持「補得到＝跑得起�
 - `agent-sandbox-claude-openspec:latest` —— `--base claude --addon openspec`
 - `agent-sandbox-codex:latest` —— `--base codex`（B0016 起內建第二 base）
 - `agent-sandbox-codex-openspec:latest` —— `--base codex --addon openspec`
-- `agent-sandbox-claude-gcloud:latest` —— `--base claude --addon gcloud`
-  （B0047，官方 Google Cloud CLI，供雲端主機維運身分使用）
+- `agent-sandbox-claude-ops:latest` —— `--base claude --addon ops`
+  （B0062，雲端主機維運工具箱：官方 Google Cloud CLI ＋ Ansible；原 B0047
+  的 `gcloud` addon 已併入）
 - `agent-sandbox-claude-office:latest` —— `--base claude --addon office`
   （B0058，LibreOffice＋CJK 字型＋OCR，讓 agent 讀得懂舊版 Office／掃描件）
 

@@ -55,7 +55,7 @@ agent-sandbox/
 ├── Dockerfile.base.claude            # base image：Claude Code（預設）
 ├── Dockerfile.base.codex             # base image：OpenAI Codex
 ├── Dockerfile.addon.openspec         # add-on 層：OpenSpec（可疊在任一 base 上）
-├── Dockerfile.addon.gcloud           # add-on 層：Google Cloud CLI（可疊在任一 base 上）
+├── Dockerfile.addon.ops              # add-on 層：維運工具箱 gcloud＋Ansible（可疊在任一 base 上）
 ├── Dockerfile.addon.office           # add-on 層：Office 文件處理／OCR（可疊在任一 base 上）
 ├── README.md                         # 你正在讀的這份（怎麼用）
 ├── CLAUDE.md                         # AI 代理讀的設計紅線索引（@import docs/design）
@@ -409,24 +409,36 @@ cat /etc/codex-cli-version    # 查 build 當下凍結的 codex 版本
 | Add-on | Dockerfile | 用途 |
 |---|---|---|
 | `openspec` | [`Dockerfile.addon.openspec`](Dockerfile.addon.openspec) | [OpenSpec](https://github.com/Fission-AI/OpenSpec) spec-driven 開發框架 |
-| `gcloud` | [`Dockerfile.addon.gcloud`](Dockerfile.addon.gcloud) | 官方 Google Cloud CLI，供雲端主機維運身分使用（見下方「多身分」段的 `ops` 情境） |
+| `ops` | [`Dockerfile.addon.ops`](Dockerfile.addon.ops) | 雲端主機維運工具箱：官方 Google Cloud CLI ＋ Ansible（ansible-core，自帶獨立 Python），供 `ops` 這類維運身分使用（見下方「多身分」段）。原 `gcloud` addon 已併入，舊用法見 [`docs/guides/migrate-gcloud-to-ops.md`](docs/guides/migrate-gcloud-to-ops.md) |
 | `office` | [`Dockerfile.addon.office`](Dockerfile.addon.office) | 舊版 Office（`.doc`/`.xls`/`.ppt`）轉檔、繁中字型、掃描件 OCR——讓 agent 讀得懂非純文字文件 |
 
-**用 gcloud**
+**用 ops（gcloud ＋ Ansible）**
 
 ```bash
-agent-sandbox --upgrade --addon gcloud    # 首次：建含 gcloud 的鏈
-agent-sandbox --identity ops --addon gcloud
+agent-sandbox --upgrade --addon ops       # 首次：建含 gcloud＋Ansible 的鏈（約 +450 MB）
+agent-sandbox --identity ops --addon ops
 
 # 容器內：
+cat /etc/ops-tools-version                # gcloud／ansible-core／uv／Python 各一行 + build date
 gcloud --version
-cat /etc/gcloud-version
+ansible --version
+ansible-galaxy collection install google.cloud   # 裝進 ~/.ansible，跨 session 保留
 ```
 
-登入態（`gcloud auth login` 的 OAuth token／application-default
-credentials）持久化在 `home/<identity>/.config/gcloud`，跟 `.claude`／
-`.codex` 同一套「拋棄式容器、登入態不拋棄」待遇——登入一次，之後每個
-session 都還在，不用重新登入。
+兩個工具的狀態都持久化在身分資料夾、跟 `.claude`／`.codex` 同一套「拋棄式
+容器、登入態不拋棄」待遇：
+
+- `home/<identity>/.config/gcloud`：`gcloud auth login` 的 OAuth token／
+  application-default credentials——登入一次，之後每個 session 都還在。
+- `home/<identity>/.ansible`：`ansible-galaxy` 裝的 collections、Galaxy token
+  ——image 刻意**不**預裝任何 collection，要什麼自己裝一次就留著。專案專屬的
+  collection 用 Ansible 原生的 `ansible.cfg`（`collections_path` 指到 workspace
+  內）即可，不需要 agent-sandbox 另外設定。
+
+> Ansible 用 [uv](https://github.com/astral-sh/uv) 裝、自帶獨立 Python（不用 gcloud
+> 帶進來的系統 python3，也不上 PATH）；SSH ControlPersist 的 socket 目錄已固定在
+> 容器 `/tmp`，不會寫進身分資料夾。取捨見
+> [`docs/design/agent-sandbox.md`](docs/design/agent-sandbox.md)「ops addon」段。
 
 **用 office（讀舊版 Office／掃描件）**
 
@@ -701,7 +713,8 @@ agent-sandbox                    # 不帶旗標＝ --identity default（一般�
 ```
 
 每個 `home/<name>/` 都是一份跟 `home/default/` 同構的獨立資料夾（`.claude`／
-`.claude.json`／`.codex`／`.gitconfig`／`.config/mise`／`.ssh`），彼此互不
+`.claude.json`／`.codex`／`.gitconfig`／`.config/mise`／`.config/gcloud`／
+`.ansible`／`.ssh`），彼此互不
 影響——適合「開發身分不帶長期憑證，維運身分帶 SSH 金鑰但少裝工具」這類風險
 區隔。新增身分：
 
