@@ -842,7 +842,7 @@ _agent-sandbox-ensure-gitconfig() {
 }
 
 # --- 啟動前置：mise-cache volume + 容器內身分骨架
-# （.claude/.codex/.config/mise/.config/gcloud/.ssh/.claude.json/.gitconfig）---
+# （.claude/.codex/.config/mise/.config/gcloud/.ansible/.ssh/.claude.json/.gitconfig）---
 # 參數：$1=要套用的 identity 名稱（省略→主函式目前的 $identity）；
 #       $2=verbose（1→逐項回報，供 --new-identity 用；省略/0→安靜，日常啟動不變）。
 _agent-sandbox-ensure-prereqs() {
@@ -859,9 +859,10 @@ _agent-sandbox-ensure-prereqs() {
     # 非預設 identity 的安全網，比照 gitconfig）。B0015 起加 .ssh；B0046 起
     # 逐項檢查存在與否（而非無條件 mkdir -p），verbose 模式下才報得出
     # 「本來就在」vs「這次新建」，日常啟動（verbose=0）不受影響；B0047 起
-    # 加 .config/gcloud（gcloud addon 的登入態持久化）。
+    # 加 .config/gcloud（gcloud addon 的登入態持久化）；B0062 起加 .ansible
+    # （ops addon 的 Ansible collections／galaxy token，gcloud addon 同時併入 ops）。
     local target_home="$_AGENT_SANDBOX_DIR/home/$target_identity"
-    local -a subdirs=(.claude .codex .config/mise .config/gcloud .ssh)
+    local -a subdirs=(.claude .codex .config/mise .config/gcloud .ansible .ssh)
     local d dpath
     for d in "${subdirs[@]}"; do
         dpath="$target_home/$d"
@@ -918,11 +919,11 @@ _agent-sandbox-ensure-prereqs() {
 # --- --new-identity 的實際動作：建立身分骨架，逐項回報，不進容器 ---
 # 參數：$1=要建立的 identity 名稱
 # 紅線：不管身分本來就存在還是全新建立，所有子項（.claude/.codex/
-# .config/mise/.config/gcloud/.ssh/.claude.json/.gitconfig）都要逐條列出
+# .config/mise/.config/gcloud/.ansible/.ssh/.claude.json/.gitconfig）都要逐條列出
 # 狀態，不可以有任何一步默默做掉（呼應本專案「隱形狀態必須可見」的一貫
 # 紅線，見「額外掛載」章節同一種立場）。底層操作天生冪等，身分已存在時
 # 重跑此指令等同一次健檢/補齊，不會覆蓋既有內容。
-# see docs/design/agent-sandbox.md「B0046」「B0047」
+# see docs/design/agent-sandbox.md「B0046」「B0047」「B0062」
 _agent-sandbox-create-identity() {
     local target_identity="$1"
     echo "🔍 檢查身分 home/$target_identity/："

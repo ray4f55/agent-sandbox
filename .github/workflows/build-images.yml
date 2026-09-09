@@ -85,10 +85,12 @@ jobs:
             addon: openspec
           - base: codex
             addon: openspec
+          # ops：gcloud（deb 約 310 MB）＋ uv／獨立 Python／ansible-core（約 140 MB），
+          # 原 gcloud addon 於 B0062 併入這個用途型 addon。
           - base: claude
-            addon: gcloud
+            addon: ops
           - base: codex
-            addon: gcloud
+            addon: ops
           # office：LibreOffice ＋ CJK 字型，約 1 GB+ ——這兩顆是本 matrix 裡
           # 最貴的雙架構 build（B0058）。日後嫌慢先降這兩筆的規格，別動其他。
           - base: claude

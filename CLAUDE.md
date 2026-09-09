@@ -67,12 +67,18 @@
   `Dockerfile.base.*` 開放 `chmod 666 /etc/ssh/ssh_config`）修正 pw_dir 錯誤時
   的 `~` 展開（B0050）→ **不要改回動 `/etc/passwd` 的 `pw_dir`**（該路已評估
   過風險更高，見 B0044/B0050 設計檔）
+- addon 分類是**用途型**（`office` 文件處理、`ops` 維運工具箱 gcloud＋Ansible，B0062）
+  → **不要再開單一工具的 addon**，新工具先過該 addon Dockerfile 開頭的納入標準；
+  addon 的相依自己裝、盡量隔離（Ansible 的 Python 走 uv、**不共用** gcloud 的系統
+  python3；uv 不上 PATH；collection 走 `.ansible` 身分掛載不烤進 image），語言
+  runtime 永遠不進 base
 
 @docs/design/agent-sandbox.md
 
 ### mise（容器內語言管理）— 詳見 @docs/design/mise.md
 
-- image **不預裝任何語言** → **不要把語言裝回 Dockerfile**（baked-in 多語言會復發舊問題）
+- image **不預裝任何語言** → **不要把語言裝回 Dockerfile**（baked-in 多語言會復發舊問題；
+  addon 內工具自己的直譯器不在此列，見 B0062 補述）
 - mise 本體用 `MISE_INSTALL_MUSL=1` 強制 musl 靜態版 → **不要拿掉**（安裝腳本
   自動偵測在 glibc 容器永遠選 gnu，gnu 有 glibc 下限、`--upgrade` 會再撞；
   舊 `MISE_LIBC` 是腳本不認的無效變數）

@@ -51,11 +51,16 @@ services:
       # （不走 -m 額外掛載機制——一旦 identity 本身就是一整份專屬資料夾，
       # .ssh 沒理由被特殊對待）。預設 identity（default）留空即可，無害。
       - ./home/${AGENT_SANDBOX_IDENTITY:-default}/.ssh:${AGENT_SANDBOX_HOME:-/home/agent-sandbox}/.ssh
-      # B0047：gcloud CLI（--addon gcloud）的登入態（OAuth token／
-      # application-default credentials）持久化，跟 claude/codex 同一套
-      # 「拋棄式容器、登入態不拋棄」待遇。對沒裝 gcloud addon 的身分只是
+      # B0047：gcloud CLI（--addon ops；原 --addon gcloud，B0062 併入）的登入態
+      # （OAuth token／application-default credentials）持久化，跟 claude/codex
+      # 同一套「拋棄式容器、登入態不拋棄」待遇。對沒裝 ops addon 的身分只是
       # 空資料夾、無害（同 .codex 全掛的邏輯，B0016 方案 A）。
       - ./home/${AGENT_SANDBOX_IDENTITY:-default}/.config/gcloud:${AGENT_SANDBOX_HOME:-/home/agent-sandbox}/.config/gcloud
+      # B0062：ops addon 的 Ansible——ansible-galaxy 裝的 collections／galaxy
+      # token 預設落在 ~/.ansible，持久化理由同 .config/gcloud（不烤進 image、
+      # 不替使用者決定 collection 清單）。ControlPersist 的 unix socket 目錄已由
+      # Dockerfile 的 ANSIBLE_SSH_CONTROL_PATH_DIR 移到容器 /tmp，不在此掛載內。
+      - ./home/${AGENT_SANDBOX_IDENTITY:-default}/.ansible:${AGENT_SANDBOX_HOME:-/home/agent-sandbox}/.ansible
       # 注意：「mise trust 紀錄」刻意「不」持久化 — 它存在 ~/.local/state/mise/，是純路徑 hash
       # (不同專案會撞同一個 /workspace/<name> 路徑空間，持久化會把「A 的信任」自動套到 B)
       # 留在容器內、隨容器消失 = 每次 session 由使用者重新確認，避免惡意 mise.toml 透過 hook 偷 token

@@ -24,6 +24,15 @@ mise 全域 config + mise-cache volume）、容器內各專案 `mise.toml`。
 → **不要把語言裝回 Dockerfile**。要新增工具走 mise.toml 路徑、不要走
 Dockerfile。
 
+> **紅線的範圍（B0062 補述）**：這條管的是「給專案用的語言 runtime」——
+> base 不裝、專案的 Python／Go／Node 一律走 mise.toml。addon 裡**工具自己的
+> 直譯器**不在此列：`ops` addon 的 gcloud deb 硬相依 Debian 系統 python3
+> （動不了）、Ansible 用 uv 管理的獨立 Python（收在 `$AGENT_TOOLS`、不上
+> PATH）。它們是那個工具的內部零件、不是給專案寫程式用的，也**不是「base
+> 可以裝語言」的先例**。判斷法：專案的 mise.toml 要不要看到它？不要 → 是
+> 工具內部相依，可以留在 addon 裡；要 → 走 mise。（原追蹤於 B0062；細節見
+> agent-sandbox.md「ops addon」章節。）
+
 ## mise 本體用 musl 靜態版（`MISE_INSTALL_MUSL=1`）
 
 mise 是「build 當下最新」安裝（同 Claude）。官方安裝腳本（`mise.run`）挑

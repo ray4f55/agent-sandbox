@@ -1,0 +1,121 @@
+# =========================================================
+# ops add-on：雲端主機維運工具箱（base-agnostic）
+# =========================================================
+# 用途型 addon（分層邏輯同 office，B0058）：供 --identity ops 這類雲端主機
+# 維運身分使用的一整組 client 工具。目前含：
+#   - Google Cloud CLI（gcloud）—— 官方 apt repo（原 B0047 的 gcloud addon）
+#   - Ansible（ansible-core）—— uv 安裝、自帶獨立 Python（B0062）
+#
+# 納入標準（防止變成什麼都往裡丟的垃圾桶）：
+#   「維運身分從沙盒內連出去管遠端主機用的 client 工具」。
+#   符合：gcloud、Ansible、（日後）kubectl／terraform／AWS CLI。
+#   不符合：語言 runtime（走 mise）、專案開發工具（openspec 那類）、
+#   文件處理（office）。see docs/design/agent-sandbox.md（B0062）
+#
+# 疊在任何 base image 上：開頭 `ARG BASE_IMAGE` + `FROM ${BASE_IMAGE}`，
+# 由 agent-sandbox 函式自動帶上 BASE_IMAGE / target tag。
+# 手動 build 範例：
+#   podman build -f Dockerfile.addon.ops \
+#       --build-arg BASE_IMAGE=agent-sandbox-claude:latest \
+#       -t agent-sandbox-claude-ops:latest .
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+# 與兩個 Dockerfile.base.* 的 ARG AGENT_TOOLS 保持一致（工具二進位區：
+# root 擁有、runtime UID 唯讀）。ARG 不跨 FROM，addon 層要自己再宣告一次。
+ARG AGENT_TOOLS=/opt/agent-tools
+
+# ---------------------------------------------------------
+# 1. Google Cloud CLI（官方 apt repo）
+# ---------------------------------------------------------
+# curl／ca-certificates 兩個 base 都已裝；額外補 apt repo 簽章驗證要用的
+# gnupg。用 gpg --dearmor 到 /usr/share/keyrings/（官方目前建議做法），取代
+# 已棄用的 apt-key add。openssh-client 明寫：Ansible 的 ssh transport 靠它
+# （base 其實已透過 git 的 Recommends 帶進來，明寫是不依賴那個間接關係）。
+# ⚠️ google-cloud-cli 這個 deb 相依「系統 python3」（Depends: python3
+# (>= 3.10), python3 (<< 3.15)），所以本層會把 Debian 的 python3 放上 PATH。
+# 這是 gcloud 的工具內部相依、不是給專案用的 runtime（專案 Python 一律走
+# mise）；Ansible 刻意「不」共用這個 python3，見下方第 2 段。
+RUN apt-get update && apt-get install -y gnupg openssh-client \
+    && curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+        | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
+        > /etc/apt/sources.list.d/google-cloud-sdk.list \
+    && apt-get update && apt-get install -y google-cloud-cli \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------
+# 2. Ansible（ansible-core，uv 安裝、自帶獨立 Python）
+# ---------------------------------------------------------
+# 為什麼不用 apt／不用系統 python3：bookworm apt 的 ansible-core 是 2.14
+# （2022 年，上游已 EOL）；PyPI 最新 ansible-core 要 Python ≥ 3.12，而 gcloud
+# 拉進來的系統 python3 是 3.11——用它裝會被卡在 2.19 這個隱形天花板
+# （B0035 mise glibc 那種「上游抬要求、--upgrade 才撞」的坑）。
+# uv（astral-sh，單一靜態 binary）能自己下載預編譯的獨立 Python
+# （python-build-standalone），amd64／arm64 自動選對，與系統 python3 完全
+# 脫鉤。see docs/design/agent-sandbox.md（B0062）
+#
+# 路徑全部收在 $AGENT_TOOLS 底下（root 擁有、runtime UID 唯讀）：
+#   $AGENT_TOOLS/uv/          uv 本體（UV_UNMANAGED_INSTALL：不改 PATH、不裝
+#                             自我更新）。uv 只是本層的安裝工具，**刻意不放上
+#                             PATH**——容器內的 Python 管理入口只有 mise 一個，
+#                             不製造第二套
+#   $AGENT_TOOLS/uv-python/   uv 管理的獨立 Python（不上 PATH，只有 ansible
+#                             的 venv 用到）
+#   $AGENT_TOOLS/uv-tools/    ansible-core 的 venv；entry script 在
+#                             uv-tools/bin，只有這個目錄加進 PATH
+# 變數名稱已對照 uv 官方 installer 原始碼與文件查證（同 mise MISE_LIBC 的
+# 教訓：上游腳本認什麼變數，讀原始碼驗證，別看名字猜）。
+ENV UV_PYTHON_INSTALL_DIR=${AGENT_TOOLS}/uv-python \
+    UV_TOOL_DIR=${AGENT_TOOLS}/uv-tools \
+    UV_TOOL_BIN_DIR=${AGENT_TOOLS}/uv-tools/bin
+
+# --python 3.13：釘 Python **minor**、不釘 patch（每次 --upgrade 抓該 minor
+# 最新 patch，安全修補照流）。刻意不追「最新 Python」：新 minor 剛發布的前
+# 幾個月，cryptography／PyYAML 等相依常還沒出對應 wheel，會退回原始碼編譯
+# （需要 Rust／gcc）而失敗；釘成熟的 minor 才穩。
+# 拆釘條件：--upgrade 時 uv 報「ansible-core 沒有版本支援 Python 3.13」
+# → 把這裡的 3.13 往上調一格即可（訊息明確指向這一行，不是隱形天花板）。
+# --with requests／google-auth：google.cloud collection 的 Python 端相依
+# （collection 本身由使用者在身分掛載 ~/.ansible 裡自管，但 Python 套件
+# 必須裝在 Ansible 的 Python 環境裡，不然掛了 collection 也跑不動）。
+# UV_COMPILE_BYTECODE=1：venv 在 runtime 是唯讀的（root 擁有），Python 無法
+# 即時寫 __pycache__，build 時先編好避免每次啟動重編。
+# UV_CACHE_DIR 指到 /tmp 並在同一層清掉，避免 wheel 快取留在 image 裡。
+RUN curl -LsSf https://astral.sh/uv/install.sh \
+        | env UV_UNMANAGED_INSTALL="${AGENT_TOOLS}/uv" sh \
+    && UV_CACHE_DIR=/tmp/uv-cache UV_COMPILE_BYTECODE=1 \
+        "${AGENT_TOOLS}/uv/uv" tool install --python 3.13 \
+            ansible-core --with requests --with google-auth \
+    && rm -rf /tmp/uv-cache
+ENV PATH="${AGENT_TOOLS}/uv-tools/bin:${PATH}"
+
+# SSH ControlPersist 的 unix socket 目錄：預設 ~/.ansible/cp 會落在身分掛載
+# （host bind mount）裡。socket 是 per-session 暫態物，放進持久化資料夾只會
+# 在 host 的 home/<identity>/.ansible/cp/ 留殘骸；而且 macOS podman machine
+# 的 virtiofs 共享檔案系統能不能建 unix socket 節點本身就不保證——直接移到
+# 容器自己的 /tmp，兩個問題一起消失。collections／galaxy token 仍留在掛載內
+# 持久化。（Ansible 遇缺目錄會自己 makedirs，不用預建。）
+ENV ANSIBLE_SSH_CONTROL_PATH_DIR=/tmp/ansible-cp
+
+# ---------------------------------------------------------
+# 3. 版本記錄：每個工具一行，取代原本的 /etc/gcloud-version（B0047）
+# ---------------------------------------------------------
+# 新增工具時在此多加一行，並同步更新 CI matrix 註解的粗估體積。
+RUN { gcloud --version | head -1; \
+      ansible --version | head -1; \
+      echo "uv $("${AGENT_TOOLS}/uv/uv" --version | awk '{print $2}')"; \
+      echo "python (ansible venv): $("${AGENT_TOOLS}/uv-tools/ansible-core/bin/python" --version)"; \
+      echo "build date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
+    } > /etc/ops-tools-version
+
+# 靜態 LABEL：指路牌，真實版本以 /etc/ops-tools-version 為準（classic
+# builder 不支援動態 LABEL 內容，同 openspec/office addon 慣例）
+LABEL ops-tools.version-file="/etc/ops-tools-version"
+
+# 登入態持久化見 docker-compose.yaml：
+#   .config/gcloud —— gcloud auth login 的 OAuth token／ADC（B0047）
+#   .ansible       —— ansible-galaxy 裝的 collections／galaxy token（B0062）
+# 都走「拋棄式容器、登入態不拋棄」同一套待遇，對沒裝本 addon 的身分只是
+# 空資料夾、無害。
